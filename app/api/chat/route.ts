@@ -142,6 +142,79 @@ export async function POST(request: NextRequest) {
         case "chat":
           const response = await aiAgent.chatResponse(message, project, conversationHistory || [])
 
+          // Check if response contains tool calls that need execution
+          if (response.includes("```tool_code")) {
+            // Extract and execute tool calls
+            const toolCallMatches = response.match(/```tool_code\n(.*?)\n```/gs)
+            let finalResponse = response
+
+            if (toolCallMatches) {
+              for (const toolCallMatch of toolCallMatches) {
+                const toolCall = toolCallMatch.replace(/```tool_code\n|\n```/g, "")
+                let toolResult = ""
+
+                try {
+                  // Execute different types of tool calls
+                  if (toolCall.includes("web_search.search")) {
+                    const queryMatch = toolCall.match(/queries=\["([^"]+)"\]/)
+                    if (queryMatch) {
+                      const query = queryMatch[1]
+                      toolResult = await searchWeb(query)
+                    }
+                  } else if (toolCall.includes('files["package.json"]')) {
+                    try {
+                      const content = await githubStorage.getFileContent("package.json")
+                      toolResult = `package.json content:\n${content}`
+                    } catch (error) {
+                      toolResult = `Error reading package.json: ${error.message}`
+                    }
+                  } else if (toolCall.includes('files["vercel.json"]')) {
+                    try {
+                      const content = await githubStorage.getFileContent("vercel.json")
+                      toolResult = `vercel.json content:\n${content}`
+                    } catch (error) {
+                      toolResult = `Error reading vercel.json: ${error.message}`
+                    }
+                  } else if (toolCall.includes("JSON.parse")) {
+                    try {
+                      const content = await githubStorage.getFileContent("package.json")
+                      JSON.parse(content)
+                      toolResult = "✅ JSON validation successful - package.json is valid"
+                    } catch (error) {
+                      toolResult = `❌ JSON validation failed: ${error.message}`
+                    }
+                  }
+
+                  // Generate follow-up response with tool results
+                  const followUpPrompt = `
+                  Previous response: ${response}
+                  Tool execution result: ${toolResult}
+                  
+                  Continue the conversation naturally, incorporating the tool results and proceeding with the next logical step. 
+                  If you mentioned you would do something, now actually do it based on the tool results.
+                  Be specific and actionable in your response.
+                  `
+
+                  const followUpResponse = await aiAgent.chatResponse(
+                    followUpPrompt,
+                    project,
+                    conversationHistory || [],
+                  )
+                  finalResponse = followUpResponse
+                } catch (toolError) {
+                  console.error("Tool execution error:", toolError)
+                  toolResult = `Error executing tool: ${toolError.message}`
+                }
+              }
+            }
+
+            return NextResponse.json({
+              success: true,
+              response: finalResponse,
+              toolExecuted: true,
+            })
+          }
+
           // Handle special chat commands
           if (message.toLowerCase().includes("create task")) {
             // Extract task details and create task
@@ -199,6 +272,40 @@ export async function POST(request: NextRequest) {
                   response: `${response}\n\n❌ Failed to implement task: ${error instanceof Error ? error.message : "Unknown error"}`,
                 })
               }
+            }
+          }
+
+          // Handle deployment commands
+          if (message.toLowerCase().includes("deploy") || message.toLowerCase().includes("fix deployment")) {
+            try {
+              const deployResponse = await fetch("/api/deploy", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  projectId,
+                  platform: "vercel",
+                }),
+              })
+
+              const deployData = await deployResponse.json()
+
+              if (deployData.success) {
+                return NextResponse.json({
+                  success: true,
+                  response: `${response}\n\n✅ Deployment successful!\nURL: ${deployData.deploymentUrl}`,
+                  deployed: true,
+                })
+              } else {
+                return NextResponse.json({
+                  success: true,
+                  response: `${response}\n\n❌ Deployment failed: ${deployData.error}`,
+                })
+              }
+            } catch (error) {
+              return NextResponse.json({
+                success: true,
+                response: `${response}\n\n❌ Deployment error: ${error.message}`,
+              })
             }
           }
 
@@ -288,7 +395,8 @@ export async function POST(request: NextRequest) {
 
         case "autonomous_followup":
           // Get project files for context
-          const files = await githubStorage.getFileCache()
+          const memory = await githubStorage.getAgentMemory()
+          const files = memory?.fileCache || {}
 
           // Check if the previous message mentioned specific actions
           const lastMessage = conversationHistory[conversationHistory.length - 1]?.content || ""

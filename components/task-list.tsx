@@ -17,7 +17,21 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { Plus, Play, CheckCircle, Clock, AlertCircle, Edit, Trash2, Zap, RefreshCw, Filter, Search } from "lucide-react"
+import {
+  Plus,
+  Play,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  Edit,
+  Trash2,
+  Zap,
+  RefreshCw,
+  Filter,
+  Search,
+  Bot,
+  FileText,
+} from "lucide-react"
 
 interface Task {
   id: string
@@ -45,6 +59,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
   const [loading, setLoading] = useState(true)
   const [implementing, setImplementing] = useState<string | null>(null)
   const [implementingAll, setImplementingAll] = useState(false)
+  const [generatingTasks, setGeneratingTasks] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [filterStatus, setFilterStatus] = useState<string>("all")
   const [searchQuery, setSearchQuery] = useState("")
@@ -116,6 +131,33 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
       }
     } catch (error) {
       console.error("Error creating task:", error)
+    }
+  }
+
+  const handleGenerateAITasks = async () => {
+    setGeneratingTasks(true)
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "generate_ai_tasks",
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        if (data.success) {
+          await loadTasks() // Reload tasks to show generated ones
+          onTaskUpdate?.("ai_generated", "generated")
+        }
+      }
+    } catch (error) {
+      console.error("Error generating AI tasks:", error)
+    } finally {
+      setGeneratingTasks(false)
     }
   }
 
@@ -337,6 +379,10 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
+          <Button onClick={handleGenerateAITasks} disabled={generatingTasks} variant="outline">
+            <Bot className="h-4 w-4 mr-2" />
+            {generatingTasks ? "Generating..." : "Generate AI Tasks"}
+          </Button>
           {pendingTasksCount > 0 && (
             <Button onClick={handleImplementAll} disabled={implementingAll}>
               <Zap className="h-4 w-4 mr-2" />
@@ -465,8 +511,14 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                           <Badge variant="outline" className={getStatusColor(task.status)}>
                             {task.status}
                           </Badge>
-                          {task.parentTaskId && (
+                          {task.type === "ai-generated" && (
                             <Badge variant="outline" className="bg-purple-100 text-purple-700">
+                              <Bot className="h-3 w-3 mr-1" />
+                              AI
+                            </Badge>
+                          )}
+                          {task.parentTaskId && (
+                            <Badge variant="outline" className="bg-orange-100 text-orange-700">
                               Subtask
                             </Badge>
                           )}
@@ -480,7 +532,8 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                             <div className="flex flex-wrap gap-1">
                               {task.files.map((file, index) => (
                                 <Badge key={index} variant="outline" className="text-xs bg-blue-50 text-blue-700">
-                                  📄 {file}
+                                  <FileText className="h-3 w-3 mr-1" />
+                                  {file}
                                 </Badge>
                               ))}
                             </div>
@@ -556,7 +609,17 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
               <div className="text-center text-slate-500 py-8">
                 <Clock className="h-8 w-8 mx-auto mb-2" />
                 <p className="text-lg font-medium mb-2">No tasks found</p>
-                <p className="text-sm">Create your first task to get started</p>
+                <p className="text-sm">Create your first task or generate AI tasks to get started</p>
+                <div className="flex gap-2 justify-center mt-4">
+                  <Button onClick={() => setShowCreateDialog(true)}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create Task
+                  </Button>
+                  <Button variant="outline" onClick={handleGenerateAITasks} disabled={generatingTasks}>
+                    <Bot className="h-4 w-4 mr-2" />
+                    Generate AI Tasks
+                  </Button>
+                </div>
               </div>
             )}
           </ScrollArea>
@@ -596,6 +659,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                 <div className="flex flex-wrap gap-2">
                   {taskFiles.map((file, index) => (
                     <Badge key={index} variant="outline" className="flex items-center gap-1">
+                      <FileText className="h-3 w-3" />
                       {file}
                       <button
                         onClick={() => setTaskFiles(taskFiles.filter((_, i) => i !== index))}
@@ -609,7 +673,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
               </div>
             </div>
 
-            {/* Subtasks Section in the dialog */}
+            {/* Subtasks Section */}
             <div>
               <h4 className="font-medium mb-2">Subtasks</h4>
               {selectedTask?.subtasks && selectedTask.subtasks.length > 0 && (

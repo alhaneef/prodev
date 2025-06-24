@@ -33,9 +33,6 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   const [agentStatus, setAgentStatus] = useState<"idle" | "thinking" | "working">("idle")
   const [replyingTo, setReplyingTo] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
-
-  // Add these state variables at the top
-  const [scrollPosition, setScrollPosition] = useState(0)
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
 
   useEffect(() => {
@@ -44,21 +41,21 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }, [isOpen, projectId])
 
-  // Add useEffect to restore scroll position
+  // Restore scroll position
   useEffect(() => {
     if (isOpen && scrollAreaRef.current && messages.length > 0) {
       const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
-      if (savedPosition) {
+      if (savedPosition && !shouldAutoScroll) {
         setTimeout(() => {
           if (scrollAreaRef.current) {
             scrollAreaRef.current.scrollTop = Number.parseInt(savedPosition)
           }
-        }, 100) // Small delay to ensure content is rendered
+        }, 100)
       }
     }
   }, [isOpen, projectId, messages.length])
 
-  // Add scroll event listener
+  // Handle scroll events
   useEffect(() => {
     const scrollArea = scrollAreaRef.current
     if (scrollArea) {
@@ -78,7 +75,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }, [projectId])
 
-  // Update the scroll to bottom logic to be conditional
+  // Auto-scroll to bottom when appropriate
   useEffect(() => {
     if (scrollAreaRef.current && shouldAutoScroll) {
       scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
@@ -113,6 +110,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   }
 
   const handleAutonomousFollowUp = async (agentResponse: string, currentMessages: Message[]) => {
+    // Check if the response contains tool calls or indicates the agent will do something
     const needsFollowUp =
       agentResponse.includes("```tool_code") ||
       agentResponse.includes("I'll start by") ||
@@ -120,9 +118,14 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
       agentResponse.includes("Let me check") ||
       agentResponse.includes("I'll examine") ||
       agentResponse.includes("I'll search") ||
-      agentResponse.includes("I'll validate")
+      agentResponse.includes("I'll validate") ||
+      agentResponse.includes("I'll inspect") ||
+      agentResponse.includes("I'll fix") ||
+      agentResponse.includes("I'll deploy") ||
+      agentResponse.includes("I'll commit")
 
     if (needsFollowUp) {
+      // Wait a moment then trigger autonomous follow-up
       setTimeout(async () => {
         setAgentStatus("working")
 
@@ -141,7 +144,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
           const followUpData = await followUpResponse.json()
 
-          if (followUpData.success) {
+          if (followUpData.success && followUpData.response) {
             const followUpMessage: Message = {
               id: `msg_${Date.now()}_followup`,
               role: "agent",
@@ -152,6 +155,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
             setMessages((prev) => [...prev, followUpMessage])
 
+            // Check if we need another follow-up
             if (followUpData.needsMoreFollowUp) {
               await handleAutonomousFollowUp(followUpData.response, [...currentMessages, followUpMessage])
             }
@@ -161,7 +165,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
         } finally {
           setAgentStatus("idle")
         }
-      }, 2000)
+      }, 2000) // 2 second delay
     }
   }
 
@@ -215,6 +219,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
         // Handle special actions
         await handleSpecialActions(inputValue, finalMessages)
 
+        // Trigger autonomous follow-up
         await handleAutonomousFollowUp(data.response, finalMessages)
 
         onUpdate?.(data.response, "chat_response")
@@ -437,7 +442,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
               )}
               <div className="flex gap-2">
                 <Input
-                  placeholder="Ask me anything, create tasks, implement features..."
+                  placeholder="Ask me anything, create tasks, implement features, deploy..."
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyPress={(e) => {

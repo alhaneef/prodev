@@ -1,8 +1,75 @@
-# ProDev Platform - Comprehensive Documentation
+# ProDev Platform - AI-Powered Development Platform
 
 ## Overview
+ProDev is a comprehensive AI-powered development platform that enables autonomous software development, project management, and deployment. The platform integrates with GitHub, various deployment services, and provides intelligent AI agents for code generation, task management, and project automation.
 
-ProDev Platform is an AI-powered autonomous development platform that provides comprehensive software development capabilities with full GitHub integration, long-term memory, bidirectional synchronization, and intelligent deployment management. The platform enables developers to create, manage, and deploy projects with AI agents that have full context awareness, persistent memory, and autonomous task execution capabilities.
+## Core Features
+
+### 1. AI-Powered Development
+- **Autonomous AI Agents**: Intelligent agents that can understand project context, generate code, implement features, and manage tasks
+- **Code Generation**: AI-driven code generation based on project requirements and existing codebase
+- **Smart Task Management**: AI can generate, prioritize, and implement development tasks
+- **Context-Aware Development**: Agents maintain project memory and context across sessions
+
+### 2. Project Management
+- **Multi-Framework Support**: Next.js, React, Vue.js, Svelte, Angular, Python, and more
+- **Task Management**: Create, manage, and track development tasks with AI assistance
+- **Sprint Planning**: Organize tasks into sprints with progress tracking
+- **File Management**: Track and manage project files with AI-powered organization
+
+### 3. GitHub Integration
+- **Repository Management**: Connect and manage GitHub repositories
+- **File Synchronization**: Real-time sync with GitHub repositories
+- **Commit Management**: AI agents can commit changes directly to repositories
+- **Branch Management**: Support for multiple branches and pull requests
+
+### 4. Deployment & DevOps
+- **Multi-Platform Deployment**: Support for Vercel, Netlify, and Cloudflare
+- **Autonomous Deployment**: AI agents can deploy projects automatically
+- **Error Detection & Fixing**: Automatic detection and fixing of deployment issues
+- **Build Optimization**: AI-powered build optimization and error resolution
+
+### 5. Real-Time Collaboration
+- **Live Chat Interface**: Real-time communication with AI agents
+- **Project Updates**: Live updates on project progress and changes
+- **Team Collaboration**: Multi-user support with role-based access
+
+## Technical Architecture
+
+### Backend Services
+- **Database**: Neon PostgreSQL for data persistence
+- **Authentication**: Firebase Auth for user management
+- **File Storage**: GitHub as primary file storage with local caching
+- **AI Services**: Google Gemini for AI capabilities
+
+### Frontend
+- **Framework**: Next.js 15 with React 19
+- **UI Components**: shadcn/ui with Tailwind CSS
+- **State Management**: React hooks and context
+- **Real-time Updates**: WebSocket connections for live updates
+
+### AI Integration
+- **Primary AI**: Google Gemini 2.0 Flash for code generation and task management
+- **Web Search**: DuckDuckGo API for information retrieval
+- **Context Management**: Persistent agent memory and project context
+
+## Current Status
+The platform is in active production use with the following capabilities:
+- ✅ User authentication and project management
+- ✅ GitHub repository integration
+- ✅ AI-powered code generation
+- ✅ Task management and tracking
+- ✅ Multi-platform deployment
+- ✅ Real-time chat interface
+- ✅ Autonomous error fixing
+- ✅ Project analytics and reporting
+
+## Known Issues & Improvements Needed
+- Chat autonomous follow-up needs enhancement
+- Deployment auto-fixing requires optimization
+- Task subtask support needs implementation
+- Repository cloning functionality needs fixes
+- Chat scroll position memory needs improvement
 
 ## Architecture
 
@@ -542,13 +609,6 @@ The platform automatically maps user-friendly framework names to platform-specif
 - AI agent performance metrics
 - Deployment statistics and success rates
 - Task completion analytics
-
-### Error Tracking
-- Comprehensive error logging
-- Performance monitoring
-- User feedback collection
-- Automated issue detection
-- Deployment failure analysis
 
 ## Future Roadmap
 
