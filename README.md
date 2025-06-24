@@ -58,7 +58,7 @@ The ProDev Platform is built with a modular architecture that includes:
 - Node.js 18+ or Python 3.8+
 - Git
 - GitHub account
-- API keys for AI services (GeminiAI, etc.)
+- API keys for AI services (OpenAI, etc.)
 
 ### Installation
 
