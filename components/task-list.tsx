@@ -59,6 +59,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
   const [showTaskDialog, setShowTaskDialog] = useState(false)
   const [taskFiles, setTaskFiles] = useState<string[]>([])
   const [newFileName, setNewFileName] = useState("")
+  const [newSubtaskTitle, setNewSubtaskTitle] = useState("")
 
   useEffect(() => {
     loadTasks()
@@ -296,6 +297,33 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
     }
   }
 
+  const handleAddSubtask = async (parentTaskId: string, subtaskTitle: string) => {
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "create_subtask",
+          parentTaskId,
+          taskData: {
+            title: subtaskTitle,
+            description: `Subtask of ${tasks.find((t) => t.id === parentTaskId)?.title}`,
+            priority: "medium",
+            estimatedTime: "1 hour",
+          },
+        }),
+      })
+
+      if (response.ok) {
+        loadTasks() // Refresh tasks
+      }
+    } catch (error) {
+      console.error("Error creating subtask:", error)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -437,12 +465,57 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                           <Badge variant="outline" className={getStatusColor(task.status)}>
                             {task.status}
                           </Badge>
+                          {task.parentTaskId && (
+                            <Badge variant="outline" className="bg-purple-100 text-purple-700">
+                              Subtask
+                            </Badge>
+                          )}
                         </div>
                         <p className="text-sm text-slate-600 mb-2">{task.description}</p>
+
+                        {/* Associated Files */}
+                        {task.files && task.files.length > 0 && (
+                          <div className="mb-2">
+                            <p className="text-xs font-medium text-slate-700 mb-1">Associated Files:</p>
+                            <div className="flex flex-wrap gap-1">
+                              {task.files.map((file, index) => (
+                                <Badge key={index} variant="outline" className="text-xs bg-blue-50 text-blue-700">
+                                  📄 {file}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Subtasks */}
+                        {task.subtasks && task.subtasks.length > 0 && (
+                          <div className="mb-2">
+                            <p className="text-xs font-medium text-slate-700 mb-1">
+                              Subtasks ({task.subtasks.filter((st) => st.status === "completed").length}/
+                              {task.subtasks.length}):
+                            </p>
+                            <div className="space-y-1 ml-4 border-l-2 border-slate-200 pl-3">
+                              {task.subtasks.map((subtask) => (
+                                <div key={subtask.id} className="flex items-center gap-2 text-xs">
+                                  {getStatusIcon(subtask.status)}
+                                  <span className={subtask.status === "completed" ? "line-through text-slate-500" : ""}>
+                                    {subtask.title}
+                                  </span>
+                                  <Badge variant="outline" className={getStatusColor(subtask.status)}>
+                                    {subtask.status}
+                                  </Badge>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
                         <div className="flex items-center gap-4 text-xs text-slate-500">
                           <span>Estimated: {task.estimatedTime}</span>
                           <span>Created: {new Date(task.createdAt).toLocaleDateString()}</span>
                           <span>Type: {task.type}</span>
+                          {task.files && <span>Files: {task.files.length}</span>}
+                          {task.subtasks && <span>Subtasks: {task.subtasks.length}</span>}
                         </div>
                       </div>
                       <div className="flex items-center gap-2 ml-4">
@@ -476,37 +549,6 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                         </Button>
                       </div>
                     </div>
-                    {task.files && task.files.length > 0 && (
-                      <div className="mt-2">
-                        <p className="text-xs font-medium text-slate-700 mb-1">Associated Files:</p>
-                        <div className="flex flex-wrap gap-1">
-                          {task.files.map((file, index) => (
-                            <Badge key={index} variant="outline" className="text-xs">
-                              {file}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {task.subtasks && task.subtasks.length > 0 && (
-                      <div className="mt-2">
-                        <p className="text-xs font-medium text-slate-700 mb-1">
-                          Subtasks ({task.subtasks.filter((st) => st.status === "completed").length}/
-                          {task.subtasks.length}):
-                        </p>
-                        <div className="space-y-1 ml-4">
-                          {task.subtasks.map((subtask) => (
-                            <div key={subtask.id} className="flex items-center gap-2 text-xs">
-                              {getStatusIcon(subtask.status)}
-                              <span className={subtask.status === "completed" ? "line-through text-slate-500" : ""}>
-                                {subtask.title}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -567,13 +609,43 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
               </div>
             </div>
 
-            {/* Subtasks Section */}
+            {/* Subtasks Section in the dialog */}
             <div>
               <h4 className="font-medium mb-2">Subtasks</h4>
-              <Button size="sm" variant="outline">
-                <Plus className="h-3 w-3 mr-1" />
-                Add Subtask
-              </Button>
+              {selectedTask?.subtasks && selectedTask.subtasks.length > 0 && (
+                <div className="space-y-2 mb-3">
+                  {selectedTask.subtasks.map((subtask) => (
+                    <div key={subtask.id} className="flex items-center justify-between p-2 border rounded">
+                      <div className="flex items-center gap-2">
+                        {getStatusIcon(subtask.status)}
+                        <span className="text-sm">{subtask.title}</span>
+                      </div>
+                      <Badge variant="outline" className={getStatusColor(subtask.status)}>
+                        {subtask.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Enter subtask title"
+                  value={newSubtaskTitle}
+                  onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                />
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    if (newSubtaskTitle.trim() && selectedTask) {
+                      handleAddSubtask(selectedTask.id, newSubtaskTitle.trim())
+                      setNewSubtaskTitle("")
+                    }
+                  }}
+                >
+                  <Plus className="h-3 w-3 mr-1" />
+                  Add
+                </Button>
+              </div>
             </div>
           </div>
 

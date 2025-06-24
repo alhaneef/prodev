@@ -17,31 +17,73 @@ function getUserFromSession(request: NextRequest) {
 // Add this function before the main POST function
 async function attemptAutonomousFix(error: any, project: any, githubStorage: any, credentials: any) {
   const errorMessage = error instanceof Error ? error.message : String(error)
+  console.log("Attempting autonomous fix for error:", errorMessage)
 
-  // Check for common deployment errors and apply fixes
+  // Check for package.json encoding/parsing issues
   if (errorMessage.includes("Can't parse json file") && errorMessage.includes("package.json")) {
-    // Fix package.json encoding issue
     try {
-      const packageJsonContent = await githubStorage.getFileContent("package.json")
+      console.log("Fixing package.json encoding issue...")
+
+      // Get current package.json content
+      let packageJsonContent = await githubStorage.getFileContent("package.json")
+
+      // Check if it's base64 encoded
+      if (packageJsonContent.startsWith("ewogICJuYW")) {
+        // Decode base64
+        packageJsonContent = Buffer.from(packageJsonContent, "base64").toString("utf-8")
+      }
 
       // Ensure it's valid JSON
       const parsed = JSON.parse(packageJsonContent)
       const cleanJson = JSON.stringify(parsed, null, 2)
 
       // Update with clean JSON
-      await githubStorage.updateFileContent("package.json", cleanJson, "🔧 Fix package.json encoding")
+      await githubStorage.updateFileContent("package.json", cleanJson, "🔧 Fix package.json encoding and formatting")
 
       return {
         fixed: true,
-        description: "Fixed package.json encoding and formatting",
+        description: "Fixed package.json encoding and JSON formatting",
       }
     } catch (fixError) {
       console.error("Failed to fix package.json:", fixError)
+
+      // Create a new valid package.json as fallback
+      const defaultPackageJson = {
+        name: project.name.toLowerCase().replace(/\s+/g, "-"),
+        version: "1.0.0",
+        private: true,
+        scripts: {
+          build: "react-scripts build",
+          start: "react-scripts start",
+          test: "react-scripts test",
+          eject: "react-scripts eject",
+        },
+        dependencies: {
+          react: "^18.2.0",
+          "react-dom": "^18.2.0",
+          "react-scripts": "5.0.1",
+        },
+        browserslist: {
+          production: [">0.2%", "not dead", "not op_mini all"],
+          development: ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"],
+        },
+      }
+
+      await githubStorage.updateFileContent(
+        "package.json",
+        JSON.stringify(defaultPackageJson, null, 2),
+        "🔧 Create new valid package.json",
+      )
+
+      return {
+        fixed: true,
+        description: "Created new valid package.json file",
+      }
     }
   }
 
+  // Fix vercel.json issues
   if (errorMessage.includes("vercel.json") && errorMessage.includes("Invalid JSON")) {
-    // Fix vercel.json
     try {
       const defaultVercelConfig = {
         version: 2,
@@ -68,7 +110,7 @@ async function attemptAutonomousFix(error: any, project: any, githubStorage: any
     }
   }
 
-  return { fixed: false, description: "No automatic fix available" }
+  return { fixed: false, description: "No automatic fix available for this error type" }
 }
 
 export async function POST(request: NextRequest) {
@@ -278,10 +320,14 @@ export async function POST(request: NextRequest) {
         )
 
         // Attempt autonomous fix
+        console.log("🤖 AI Agent attempting to fix deployment error...")
+
         try {
           const fixResult = await attemptAutonomousFix(deployError, project, githubStorage, credentials)
 
           if (fixResult.fixed) {
+            console.log(`✅ Auto-fix applied: ${fixResult.description}`)
+
             // Log the fix
             const fixLog = {
               projectId,
@@ -297,9 +343,34 @@ export async function POST(request: NextRequest) {
               "🔧 Log auto-fix attempt",
             )
 
-            // Retry deployment
+            // Wait a moment for GitHub to process the changes
+            await new Promise((resolve) => setTimeout(resolve, 3000))
+
+            // Retry deployment with fresh files
+            console.log("🔄 Retrying deployment after auto-fix...")
+
+            const retryFiles = await github.listFiles(owner, repo)
+            const retryDeploymentFiles = await Promise.all(
+              retryFiles
+                .filter((file) => file.type === "file")
+                .map(async (file) => {
+                  try {
+                    const content = await github.getFileContent(owner, repo, file.path)
+                    return {
+                      path: file.path,
+                      content: content.content,
+                    }
+                  } catch (error) {
+                    console.error(`Failed to get content for ${file.path}:`, error)
+                    return null
+                  }
+                }),
+            )
+
+            const validRetryFiles = retryDeploymentFiles.filter(Boolean) as Array<{ path: string; content: string }>
+
             try {
-              const retryResult = await deploymentService.deployToVercel(deployConfig, validFiles)
+              const retryResult = await deploymentService.deployToVercel(deployConfig, validRetryFiles)
 
               const successLog = {
                 projectId,
@@ -324,13 +395,31 @@ export async function POST(request: NextRequest) {
                 status: "success",
                 message: "Deployment successful after auto-fix",
                 autoFixed: true,
+                fixDescription: fixResult.description,
               })
             } catch (retryError) {
               console.error("Retry deployment failed:", retryError)
+
+              const retryFailLog = {
+                projectId,
+                platform,
+                status: "retry_failed",
+                message: `Retry failed after auto-fix: ${retryError.message}`,
+                timestamp: new Date().toISOString(),
+              }
+
+              await githubStorage.updateFileContent(
+                ".prodev/deployment-logs.json",
+                JSON.stringify([deploymentLog, errorLog, fixLog, retryFailLog], null, 2),
+                "❌ Log retry failure",
+              )
             }
+          } else {
+            console.log("❌ AI Agent could not generate automatic fix")
           }
         } catch (fixError) {
           console.error("Auto-fix failed:", fixError)
+          console.log("❌ AI Agent could not generate automatic fix")
         }
 
         return NextResponse.json({

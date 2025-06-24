@@ -56,11 +56,11 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await db.updateTask(taskId, { files: files })
-
-        // Also update in GitHub storage
         const tasks = await githubStorage.getTasks()
-        const updatedTasks = tasks.map((task) => (task.id === taskId ? { ...task, files } : task))
+        const updatedTasks = tasks.map((task) =>
+          task.id === taskId ? { ...task, files: files, updatedAt: new Date().toISOString() } : task,
+        )
+
         await githubStorage.saveTasks(updatedTasks)
 
         return NextResponse.json({
@@ -95,6 +95,54 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
           success: false,
           error: error instanceof Error ? error.message : "Failed to delete task",
+        })
+      }
+
+    case "create_subtask":
+      const { parentTaskId, taskData } = await req.json()
+
+      if (!parentTaskId || !taskData.title) {
+        return NextResponse.json({ success: false, error: "Parent task ID and title required" })
+      }
+
+      try {
+        const subtask = {
+          id: `task_${Date.now()}`,
+          title: taskData.title,
+          description: taskData.description,
+          status: "pending",
+          priority: taskData.priority || "medium",
+          type: "manual",
+          estimatedTime: taskData.estimatedTime || "1 hour",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          parentTaskId,
+          files: taskData.files || [],
+          dependencies: taskData.dependencies || [],
+        }
+
+        // Get current tasks and add subtask to parent
+        const tasks = await githubStorage.getTasks()
+        const updatedTasks = tasks.map((task) => {
+          if (task.id === parentTaskId) {
+            return {
+              ...task,
+              subtasks: [...(task.subtasks || []), subtask],
+            }
+          }
+          return task
+        })
+
+        await githubStorage.saveTasks(updatedTasks)
+
+        return NextResponse.json({
+          success: true,
+          subtask,
+        })
+      } catch (error) {
+        return NextResponse.json({
+          success: false,
+          error: error instanceof Error ? error.message : "Failed to create subtask",
         })
       }
 

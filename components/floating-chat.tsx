@@ -36,6 +36,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
   // Add these state variables at the top
   const [scrollPosition, setScrollPosition] = useState(0)
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
 
   useEffect(() => {
     if (isOpen) {
@@ -45,13 +46,17 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
   // Add useEffect to restore scroll position
   useEffect(() => {
-    if (isOpen && scrollAreaRef.current) {
+    if (isOpen && scrollAreaRef.current && messages.length > 0) {
       const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
       if (savedPosition) {
-        scrollAreaRef.current.scrollTop = Number.parseInt(savedPosition)
+        setTimeout(() => {
+          if (scrollAreaRef.current) {
+            scrollAreaRef.current.scrollTop = Number.parseInt(savedPosition)
+          }
+        }, 100) // Small delay to ensure content is rendered
       }
     }
-  }, [isOpen, messages])
+  }, [isOpen, projectId, messages.length])
 
   // Add scroll event listener
   useEffect(() => {
@@ -59,8 +64,13 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     if (scrollArea) {
       const handleScroll = () => {
         const position = scrollArea.scrollTop
-        setScrollPosition(position)
+        const maxScroll = scrollArea.scrollHeight - scrollArea.clientHeight
+
+        // Save scroll position
         localStorage.setItem(`chat-scroll-${projectId}`, position.toString())
+
+        // Determine if user is near bottom (within 100px)
+        setShouldAutoScroll(maxScroll - position < 100)
       }
 
       scrollArea.addEventListener("scroll", handleScroll)
@@ -70,14 +80,10 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
   // Update the scroll to bottom logic to be conditional
   useEffect(() => {
-    if (scrollAreaRef.current) {
-      const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
-      if (!savedPosition || scrollAreaRef.current.scrollHeight - scrollAreaRef.current.scrollTop < 100) {
-        // Only auto-scroll if user is near bottom or no saved position
-        scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
-      }
+    if (scrollAreaRef.current && shouldAutoScroll) {
+      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, shouldAutoScroll])
 
   const loadChatHistory = async () => {
     try {

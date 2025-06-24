@@ -98,6 +98,50 @@ export class AIAgent {
     }
   }
 
+  async executeToolCall(toolCall: string, context: any): Promise<string> {
+    try {
+      // Parse the tool call
+      if (toolCall.includes("web_search.search")) {
+        const queryMatch = toolCall.match(/queries=\["([^"]+)"\]/)
+        if (queryMatch) {
+          const query = queryMatch[1]
+          return await this.searchWeb(query)
+        }
+      }
+
+      if (toolCall.includes('files["package.json"]')) {
+        // Get package.json content from GitHub storage
+        if (this.githubStorage) {
+          try {
+            const content = await this.githubStorage.getFileContent("package.json")
+            return `package.json content:\n${content}`
+          } catch (error) {
+            return `Error reading package.json: ${error.message}`
+          }
+        }
+        return "GitHub storage not available"
+      }
+
+      if (toolCall.includes("JSON.parse")) {
+        // Validate JSON content
+        const jsonMatch = toolCall.match(/JSON\.parse$$([^)]+)$$/)
+        if (jsonMatch && this.githubStorage) {
+          try {
+            const content = await this.githubStorage.getFileContent("package.json")
+            JSON.parse(content)
+            return "✅ JSON validation successful - package.json is valid"
+          } catch (error) {
+            return `❌ JSON validation failed: ${error.message}`
+          }
+        }
+      }
+
+      return "Tool call executed but no specific handler found"
+    } catch (error) {
+      return `Error executing tool call: ${error.message}`
+    }
+  }
+
   async getProjectContext(): Promise<any> {
     if (!this.githubStorage) {
       return {}
@@ -507,6 +551,27 @@ export class AIAgent {
       const result = await this.model.generateContent(prompt)
       const response = await result.response
       const chatResponse = response.text()
+
+      // After generating the initial response, check for tool calls
+      if (chatResponse.includes("```tool_code")) {
+        const toolCallMatch = chatResponse.match(/```tool_code\n(.*?)\n```/s)
+        if (toolCallMatch) {
+          const toolCall = toolCallMatch[1]
+          const toolResult = await this.executeToolCall(toolCall, fullContext)
+
+          // Generate follow-up response with tool results
+          const followUpPrompt = `
+          Previous response: ${chatResponse}
+          Tool execution result: ${toolResult}
+          
+          Continue the conversation naturally, incorporating the tool results and proceeding with the next logical step.
+          `
+
+          const followUpResult = await this.model.generateContent(followUpPrompt)
+          const followUpResponse = await followUpResult.response
+          return chatResponse + "\n\n" + followUpResponse.text()
+        }
+      }
 
       // Update conversation history in agent memory
       if (this.githubStorage) {

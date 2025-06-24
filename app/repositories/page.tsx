@@ -97,17 +97,23 @@ export default function RepositoriesPage() {
 
   const handleCloneRepository = async (repo: Repository) => {
     try {
+      setLoadingRepos(true)
+
       // Check if project already exists
       const existingProjects = await fetch("/api/projects", {
         credentials: "include",
       })
       const projectsData = await existingProjects.json()
 
-      const existingProject = projectsData.projects?.find((p: any) => p.repository === repo.fullName)
+      if (projectsData.success && projectsData.projects) {
+        const existingProject = projectsData.projects.find(
+          (p: any) => p.repository === repo.fullName || p.name === repo.name,
+        )
 
-      if (existingProject) {
-        alert(`Project "${existingProject.name}" already exists for this repository.`)
-        return
+        if (existingProject) {
+          alert(`Project "${existingProject.name}" already exists for this repository.`)
+          return
+        }
       }
 
       // Create new project from repository
@@ -121,21 +127,28 @@ export default function RepositoriesPage() {
           framework: detectFramework(repo.language),
           repository: repo.fullName,
           template: "existing",
+          isCloned: true,
         }),
       })
 
       if (response.ok) {
         const data = await response.json()
-        alert(`Successfully cloned repository as project: ${data.project.name}`)
-        // Redirect to the new project
-        window.location.href = `/projects/${data.project.id}`
+        if (data.success) {
+          alert(`Successfully cloned repository as project: ${data.project.name}`)
+          // Redirect to the new project
+          window.location.href = `/projects/${data.project.id}`
+        } else {
+          throw new Error(data.error || "Failed to create project")
+        }
       } else {
         const error = await response.json()
-        alert(`Failed to clone repository: ${error.error}`)
+        throw new Error(error.error || "Failed to clone repository")
       }
     } catch (error) {
       console.error("Error cloning repository:", error)
-      alert("Failed to clone repository. Please try again.")
+      alert(`Failed to clone repository: ${error.message}`)
+    } finally {
+      setLoadingRepos(false)
     }
   }
 
