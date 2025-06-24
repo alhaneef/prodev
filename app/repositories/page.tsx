@@ -95,6 +95,65 @@ export default function RepositoriesPage() {
     return colors[language] || "bg-gray-100 text-gray-700"
   }
 
+  const handleCloneRepository = async (repo: Repository) => {
+    try {
+      // Check if project already exists
+      const existingProjects = await fetch("/api/projects", {
+        credentials: "include",
+      })
+      const projectsData = await existingProjects.json()
+
+      const existingProject = projectsData.projects?.find((p: any) => p.repository === repo.fullName)
+
+      if (existingProject) {
+        alert(`Project "${existingProject.name}" already exists for this repository.`)
+        return
+      }
+
+      // Create new project from repository
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          name: repo.name,
+          description: repo.description || `Cloned from ${repo.fullName}`,
+          framework: detectFramework(repo.language),
+          repository: repo.fullName,
+          template: "existing",
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        alert(`Successfully cloned repository as project: ${data.project.name}`)
+        // Redirect to the new project
+        window.location.href = `/projects/${data.project.id}`
+      } else {
+        const error = await response.json()
+        alert(`Failed to clone repository: ${error.error}`)
+      }
+    } catch (error) {
+      console.error("Error cloning repository:", error)
+      alert("Failed to clone repository. Please try again.")
+    }
+  }
+
+  // Add framework detection helper
+  const detectFramework = (language: string) => {
+    const frameworkMap: Record<string, string> = {
+      JavaScript: "React",
+      TypeScript: "Next.js",
+      Python: "Python",
+      Java: "Java",
+      "C++": "C++",
+      Go: "Go",
+      Rust: "Rust",
+      PHP: "PHP",
+    }
+    return frameworkMap[language] || "React"
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -246,7 +305,7 @@ export default function RepositoriesPage() {
                         View on GitHub
                       </a>
                     </Button>
-                    <Button size="sm">
+                    <Button size="sm" onClick={() => handleCloneRepository(repo)}>
                       <GitBranch className="h-4 w-4 mr-2" />
                       Clone
                     </Button>

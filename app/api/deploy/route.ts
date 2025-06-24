@@ -14,6 +14,63 @@ function getUserFromSession(request: NextRequest) {
   }
 }
 
+// Add this function before the main POST function
+async function attemptAutonomousFix(error: any, project: any, githubStorage: any, credentials: any) {
+  const errorMessage = error instanceof Error ? error.message : String(error)
+
+  // Check for common deployment errors and apply fixes
+  if (errorMessage.includes("Can't parse json file") && errorMessage.includes("package.json")) {
+    // Fix package.json encoding issue
+    try {
+      const packageJsonContent = await githubStorage.getFileContent("package.json")
+
+      // Ensure it's valid JSON
+      const parsed = JSON.parse(packageJsonContent)
+      const cleanJson = JSON.stringify(parsed, null, 2)
+
+      // Update with clean JSON
+      await githubStorage.updateFileContent("package.json", cleanJson, "🔧 Fix package.json encoding")
+
+      return {
+        fixed: true,
+        description: "Fixed package.json encoding and formatting",
+      }
+    } catch (fixError) {
+      console.error("Failed to fix package.json:", fixError)
+    }
+  }
+
+  if (errorMessage.includes("vercel.json") && errorMessage.includes("Invalid JSON")) {
+    // Fix vercel.json
+    try {
+      const defaultVercelConfig = {
+        version: 2,
+        builds: [
+          {
+            src: "package.json",
+            use: "@vercel/static-build",
+          },
+        ],
+      }
+
+      await githubStorage.updateFileContent(
+        "vercel.json",
+        JSON.stringify(defaultVercelConfig, null, 2),
+        "🔧 Fix vercel.json configuration",
+      )
+
+      return {
+        fixed: true,
+        description: "Fixed vercel.json configuration",
+      }
+    } catch (fixError) {
+      console.error("Failed to fix vercel.json:", fixError)
+    }
+  }
+
+  return { fixed: false, description: "No automatic fix available" }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const user = getUserFromSession(request)
@@ -201,6 +258,9 @@ export async function POST(request: NextRequest) {
             actualStatus === "success" ? "Deployment successful" : "Deployment completed but verification failed",
         })
       } catch (deployError) {
+        // After deployment failure, add autonomous fix attempt
+        console.error("Deployment error:", deployError)
+
         // Log deployment error
         const errorLog = {
           projectId,
@@ -217,7 +277,66 @@ export async function POST(request: NextRequest) {
           "❌ Log deployment error",
         )
 
-        throw deployError
+        // Attempt autonomous fix
+        try {
+          const fixResult = await attemptAutonomousFix(deployError, project, githubStorage, credentials)
+
+          if (fixResult.fixed) {
+            // Log the fix
+            const fixLog = {
+              projectId,
+              platform,
+              status: "fixing",
+              message: `Auto-fix applied: ${fixResult.description}`,
+              timestamp: new Date().toISOString(),
+            }
+
+            await githubStorage.updateFileContent(
+              ".prodev/deployment-logs.json",
+              JSON.stringify([deploymentLog, errorLog, fixLog], null, 2),
+              "🔧 Log auto-fix attempt",
+            )
+
+            // Retry deployment
+            try {
+              const retryResult = await deploymentService.deployToVercel(deployConfig, validFiles)
+
+              const successLog = {
+                projectId,
+                platform,
+                status: "success",
+                message: "Deployment successful after auto-fix",
+                deploymentUrl: retryResult.url,
+                deploymentId: retryResult.id,
+                timestamp: new Date().toISOString(),
+              }
+
+              await githubStorage.updateFileContent(
+                ".prodev/deployment-logs.json",
+                JSON.stringify([deploymentLog, errorLog, fixLog, successLog], null, 2),
+                "✅ Log successful retry",
+              )
+
+              return NextResponse.json({
+                success: true,
+                deploymentUrl: retryResult.url,
+                deploymentId: retryResult.id,
+                status: "success",
+                message: "Deployment successful after auto-fix",
+                autoFixed: true,
+              })
+            } catch (retryError) {
+              console.error("Retry deployment failed:", retryError)
+            }
+          }
+        } catch (fixError) {
+          console.error("Auto-fix failed:", fixError)
+        }
+
+        return NextResponse.json({
+          success: false,
+          error: deployError instanceof Error ? deployError.message : "Deployment failed",
+        })
       }
     } catch (deployError) {
       console.error("Deployment error:", deployError)

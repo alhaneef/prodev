@@ -31,6 +31,8 @@ interface Task {
   updatedAt: string
   files?: string[]
   dependencies?: string[]
+  subtasks?: Task[]
+  parentTaskId?: string
 }
 
 interface TaskListProps {
@@ -52,6 +54,11 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
     priority: "medium" as const,
     estimatedTime: "2 hours",
   })
+
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null)
+  const [showTaskDialog, setShowTaskDialog] = useState(false)
+  const [taskFiles, setTaskFiles] = useState<string[]>([])
+  const [newFileName, setNewFileName] = useState("")
 
   useEffect(() => {
     loadTasks()
@@ -266,6 +273,29 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
 
   const pendingTasksCount = tasks.filter((t) => t.status === "pending").length
 
+  const handleUpdateTaskFiles = async (taskId: string, files: string[]) => {
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "update_files",
+          taskId,
+          files,
+        }),
+      })
+
+      if (response.ok) {
+        // Refresh tasks
+        loadTasks()
+      }
+    } catch (error) {
+      console.error("Error updating task files:", error)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -429,14 +459,54 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                             )}
                           </Button>
                         )}
-                        <Button variant="outline" size="sm">
-                          <Edit className="h-3 w-3" />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedTask(task)
+                            setTaskFiles(task.files || [])
+                            setShowTaskDialog(true)
+                          }}
+                        >
+                          <Edit className="h-3 w-3 mr-1" />
+                          Manage
                         </Button>
                         <Button variant="outline" size="sm" onClick={() => handleDeleteTask(task.id)}>
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
                     </div>
+                    {task.files && task.files.length > 0 && (
+                      <div className="mt-2">
+                        <p className="text-xs font-medium text-slate-700 mb-1">Associated Files:</p>
+                        <div className="flex flex-wrap gap-1">
+                          {task.files.map((file, index) => (
+                            <Badge key={index} variant="outline" className="text-xs">
+                              {file}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {task.subtasks && task.subtasks.length > 0 && (
+                      <div className="mt-2">
+                        <p className="text-xs font-medium text-slate-700 mb-1">
+                          Subtasks ({task.subtasks.filter((st) => st.status === "completed").length}/
+                          {task.subtasks.length}):
+                        </p>
+                        <div className="space-y-1 ml-4">
+                          {task.subtasks.map((subtask) => (
+                            <div key={subtask.id} className="flex items-center gap-2 text-xs">
+                              {getStatusIcon(subtask.status)}
+                              <span className={subtask.status === "completed" ? "line-through text-slate-500" : ""}>
+                                {subtask.title}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -450,6 +520,80 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
           </ScrollArea>
         </CardContent>
       </Card>
+
+      <Dialog open={showTaskDialog} onOpenChange={setShowTaskDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Manage Task: {selectedTask?.title}</DialogTitle>
+            <DialogDescription>Add files and subtasks to this task</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-6">
+            {/* Associated Files Section */}
+            <div>
+              <h4 className="font-medium mb-2">Associated Files</h4>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Enter file path (e.g., src/components/Header.tsx)"
+                    value={newFileName}
+                    onChange={(e) => setNewFileName(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (newFileName.trim()) {
+                        setTaskFiles([...taskFiles, newFileName.trim()])
+                        setNewFileName("")
+                      }
+                    }}
+                  >
+                    Add File
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {taskFiles.map((file, index) => (
+                    <Badge key={index} variant="outline" className="flex items-center gap-1">
+                      {file}
+                      <button
+                        onClick={() => setTaskFiles(taskFiles.filter((_, i) => i !== index))}
+                        className="ml-1 text-red-500 hover:text-red-700"
+                      >
+                        ×
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Subtasks Section */}
+            <div>
+              <h4 className="font-medium mb-2">Subtasks</h4>
+              <Button size="sm" variant="outline">
+                <Plus className="h-3 w-3 mr-1" />
+                Add Subtask
+              </Button>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTaskDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={async () => {
+                if (selectedTask) {
+                  await handleUpdateTaskFiles(selectedTask.id, taskFiles)
+                  setShowTaskDialog(false)
+                }
+              }}
+            >
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

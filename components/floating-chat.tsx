@@ -34,15 +34,48 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   const [replyingTo, setReplyingTo] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
 
+  // Add these state variables at the top
+  const [scrollPosition, setScrollPosition] = useState(0)
+
   useEffect(() => {
     if (isOpen) {
       loadChatHistory()
     }
   }, [isOpen, projectId])
 
+  // Add useEffect to restore scroll position
+  useEffect(() => {
+    if (isOpen && scrollAreaRef.current) {
+      const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
+      if (savedPosition) {
+        scrollAreaRef.current.scrollTop = Number.parseInt(savedPosition)
+      }
+    }
+  }, [isOpen, messages])
+
+  // Add scroll event listener
+  useEffect(() => {
+    const scrollArea = scrollAreaRef.current
+    if (scrollArea) {
+      const handleScroll = () => {
+        const position = scrollArea.scrollTop
+        setScrollPosition(position)
+        localStorage.setItem(`chat-scroll-${projectId}`, position.toString())
+      }
+
+      scrollArea.addEventListener("scroll", handleScroll)
+      return () => scrollArea.removeEventListener("scroll", handleScroll)
+    }
+  }, [projectId])
+
+  // Update the scroll to bottom logic to be conditional
   useEffect(() => {
     if (scrollAreaRef.current) {
-      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
+      const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
+      if (!savedPosition || scrollAreaRef.current.scrollHeight - scrollAreaRef.current.scrollTop < 100) {
+        // Only auto-scroll if user is near bottom or no saved position
+        scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
+      }
     }
   }, [messages])
 
@@ -70,6 +103,59 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
       }
     } catch (error) {
       console.error("Error loading chat history:", error)
+    }
+  }
+
+  const handleAutonomousFollowUp = async (agentResponse: string, currentMessages: Message[]) => {
+    const needsFollowUp =
+      agentResponse.includes("```tool_code") ||
+      agentResponse.includes("I'll start by") ||
+      agentResponse.includes("First, let's") ||
+      agentResponse.includes("Let me check") ||
+      agentResponse.includes("I'll examine") ||
+      agentResponse.includes("I'll search") ||
+      agentResponse.includes("I'll validate")
+
+    if (needsFollowUp) {
+      setTimeout(async () => {
+        setAgentStatus("working")
+
+        try {
+          const followUpResponse = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              projectId,
+              action: "autonomous_followup",
+              message: "Continue with the planned action",
+              conversationHistory: currentMessages.slice(-10),
+            }),
+          })
+
+          const followUpData = await followUpResponse.json()
+
+          if (followUpData.success) {
+            const followUpMessage: Message = {
+              id: `msg_${Date.now()}_followup`,
+              role: "agent",
+              content: followUpData.response,
+              timestamp: new Date().toISOString(),
+              type: "text",
+            }
+
+            setMessages((prev) => [...prev, followUpMessage])
+
+            if (followUpData.needsMoreFollowUp) {
+              await handleAutonomousFollowUp(followUpData.response, [...currentMessages, followUpMessage])
+            }
+          }
+        } catch (error) {
+          console.error("Autonomous follow-up error:", error)
+        } finally {
+          setAgentStatus("idle")
+        }
+      }, 2000)
     }
   }
 
@@ -122,6 +208,8 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
         // Handle special actions
         await handleSpecialActions(inputValue, finalMessages)
+
+        await handleAutonomousFollowUp(data.response, finalMessages)
 
         onUpdate?.(data.response, "chat_response")
       } else {

@@ -118,6 +118,7 @@ export function ChatInterface({ projectId, onUpdate }: ChatInterfaceProps) {
 
       const data = await response.json()
 
+      // After getting the chat response, check if agent needs to follow up
       if (data.success) {
         const agentMessage: Message = {
           id: `msg_${Date.now()}_agent`,
@@ -131,21 +132,9 @@ export function ChatInterface({ projectId, onUpdate }: ChatInterfaceProps) {
         setMessages(finalMessages)
         await saveChatHistory(finalMessages)
 
-        // Check if the user is requesting implementation or task management
-        const lowerInput = inputValue.toLowerCase()
-        if (
-          lowerInput.includes("implement") ||
-          lowerInput.includes("build") ||
-          lowerInput.includes("create") ||
-          lowerInput.includes("add") ||
-          lowerInput.includes("task") ||
-          lowerInput.includes("sprint")
-        ) {
-          setAgentStatus("working")
-          await handleSpecialRequest(inputValue, finalMessages)
-        }
+        // Check for autonomous follow-up actions
+        await handleAutonomousFollowUp(data.response, finalMessages)
 
-        // Notify parent component of updates
         onUpdate?.(data.response, "chat_response")
       } else {
         throw new Error(data.error)
@@ -281,6 +270,62 @@ export function ChatInterface({ projectId, onUpdate }: ChatInterfaceProps) {
       }
     } catch (error) {
       console.error("Error handling special request:", error)
+    }
+  }
+
+  const handleAutonomousFollowUp = async (agentResponse: string, currentMessages: Message[]) => {
+    // Check if agent mentioned tool usage or needs to follow up
+    const needsFollowUp =
+      agentResponse.includes("```tool_code") ||
+      agentResponse.includes("I'll start by") ||
+      agentResponse.includes("First, let's") ||
+      agentResponse.includes("Let me check") ||
+      agentResponse.includes("I'll examine") ||
+      agentResponse.includes("I'll search") ||
+      agentResponse.includes("I'll validate")
+
+    if (needsFollowUp) {
+      // Wait a moment then continue the conversation
+      setTimeout(async () => {
+        setAgentStatus("working")
+
+        try {
+          const followUpResponse = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              projectId,
+              action: "autonomous_followup",
+              message: "Continue with the planned action",
+              conversationHistory: currentMessages.slice(-10),
+            }),
+          })
+
+          const followUpData = await followUpResponse.json()
+
+          if (followUpData.success) {
+            const followUpMessage: Message = {
+              id: `msg_${Date.now()}_followup`,
+              role: "agent",
+              content: followUpData.response,
+              timestamp: new Date().toISOString(),
+              type: "text",
+            }
+
+            setMessages((prev) => [...prev, followUpMessage])
+
+            // Check if more follow-up is needed
+            if (followUpData.needsMoreFollowUp) {
+              await handleAutonomousFollowUp(followUpData.response, [...currentMessages, followUpMessage])
+            }
+          }
+        } catch (error) {
+          console.error("Autonomous follow-up error:", error)
+        } finally {
+          setAgentStatus("idle")
+        }
+      }, 2000) // 2 second delay for natural conversation flow
     }
   }
 

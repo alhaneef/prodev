@@ -14,6 +14,38 @@ function getUserFromSession(request: NextRequest) {
   }
 }
 
+// Add web search function at the top
+async function searchWeb(query: string): Promise<string> {
+  try {
+    // Using DuckDuckGo Instant Answer API
+    const response = await fetch(
+      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
+    )
+    const data = await response.json()
+
+    let searchResults = ""
+    if (data.AbstractText) {
+      searchResults += `Abstract: ${data.AbstractText}\n`
+    }
+    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
+      searchResults += "\nRelated Information:\n"
+      data.RelatedTopics.slice(0, 3).forEach((topic: any, index: number) => {
+        if (topic.Text) {
+          searchResults += `${index + 1}. ${topic.Text}\n`
+        }
+      })
+    }
+    if (data.Answer) {
+      searchResults += `\nDirect Answer: ${data.Answer}\n`
+    }
+
+    return searchResults || "No relevant information found."
+  } catch (error) {
+    console.error("Web search error:", error)
+    return "Web search temporarily unavailable."
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     const user = getUserFromSession(request)
@@ -252,6 +284,55 @@ export async function POST(request: NextRequest) {
             success: true,
             results,
             message: `Processed ${results.length} tasks`,
+          })
+
+        case "autonomous_followup":
+          // Get project files for context
+          const files = await githubStorage.getFileCache()
+
+          // Check if the previous message mentioned specific actions
+          const lastMessage = conversationHistory[conversationHistory.length - 1]?.content || ""
+
+          let followUpResponse = ""
+          let needsMoreFollowUp = false
+
+          if (lastMessage.includes("JSON validator") || lastMessage.includes("validate")) {
+            // Perform JSON validation
+            try {
+              const packageJsonContent = files["package.json"]?.content
+              if (packageJsonContent) {
+                JSON.parse(packageJsonContent)
+                followUpResponse =
+                  "✅ package.json validation successful - the JSON is valid. The deployment error might be due to encoding issues during upload. Let me check the vercel.json file as well."
+                needsMoreFollowUp = true
+              }
+            } catch (error) {
+              followUpResponse = `❌ Found JSON syntax error in package.json: ${error.message}. I'll fix this now.`
+              needsMoreFollowUp = true
+            }
+          } else if (lastMessage.includes("inspect") || lastMessage.includes("examine")) {
+            // Inspect files mentioned
+            const packageJsonContent = files["package.json"]?.content
+            const vercelJsonContent = files["vercel.json"]?.content
+
+            followUpResponse = `📋 File inspection results:
+
+package.json status: ${packageJsonContent ? "Found" : "Missing"}
+vercel.json status: ${vercelJsonContent ? "Found" : "Missing"}
+
+The deployment error suggests the package.json is being base64 encoded during upload. This typically happens when there are encoding issues. Let me fix the deployment configuration.`
+            needsMoreFollowUp = true
+          } else if (lastMessage.includes("search")) {
+            // Perform web search
+            const searchQuery = message.match(/search.*?for\s+(.+)/i)?.[1] || "JSON validator online"
+            const searchResults = await searchWeb(searchQuery)
+            followUpResponse = `🔍 Web search results for "${searchQuery}":\n\n${searchResults}`
+          }
+
+          return NextResponse.json({
+            success: true,
+            response: followUpResponse,
+            needsMoreFollowUp,
           })
 
         default:
