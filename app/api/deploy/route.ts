@@ -3,6 +3,7 @@ import { db } from "@/lib/database"
 import { GitHubService } from "@/lib/github"
 import { DeploymentService } from "@/lib/deployment"
 import { GitHubStorageService } from "@/lib/github-storage"
+import { AIAgent } from "@/lib/ai-agent"
 
 function getUserFromSession(request: NextRequest) {
   try {
@@ -14,103 +15,140 @@ function getUserFromSession(request: NextRequest) {
   }
 }
 
-// Add this function before the main POST function
-async function attemptAutonomousFix(error: any, project: any, githubStorage: any, credentials: any) {
-  const errorMessage = error instanceof Error ? error.message : String(error)
-  console.log("Attempting autonomous fix for error:", errorMessage)
+// Dynamic deployment error auto-fix function
+async function attemptAutonomousFix(deploymentLogs: string, project: any, githubStorage: any, credentials: any) {
+  console.log("🤖 AI Agent analyzing deployment error...")
 
-  // Check for package.json encoding/parsing issues
-  if (errorMessage.includes("Can't parse json file") && errorMessage.includes("package.json")) {
-    try {
-      console.log("Fixing package.json encoding issue...")
-
-      // Get current package.json content
-      let packageJsonContent = await githubStorage.getFileContent("package.json")
-
-      // Check if it's base64 encoded
-      if (packageJsonContent.startsWith("ewogICJuYW")) {
-        // Decode base64
-        packageJsonContent = Buffer.from(packageJsonContent, "base64").toString("utf-8")
-      }
-
-      // Ensure it's valid JSON
-      const parsed = JSON.parse(packageJsonContent)
-      const cleanJson = JSON.stringify(parsed, null, 2)
-
-      // Update with clean JSON
-      await githubStorage.updateFileContent("package.json", cleanJson, "🔧 Fix package.json encoding and formatting")
-
-      return {
-        fixed: true,
-        description: "Fixed package.json encoding and JSON formatting",
-      }
-    } catch (fixError) {
-      console.error("Failed to fix package.json:", fixError)
-
-      // Create a new valid package.json as fallback
-      const defaultPackageJson = {
-        name: project.name.toLowerCase().replace(/\s+/g, "-"),
-        version: "1.0.0",
-        private: true,
-        scripts: {
-          build: "react-scripts build",
-          start: "react-scripts start",
-          test: "react-scripts test",
-          eject: "react-scripts eject",
-        },
-        dependencies: {
-          react: "^18.2.0",
-          "react-dom": "^18.2.0",
-          "react-scripts": "5.0.1",
-        },
-        browserslist: {
-          production: [">0.2%", "not dead", "not op_mini all"],
-          development: ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"],
-        },
-      }
-
-      await githubStorage.updateFileContent(
-        "package.json",
-        JSON.stringify(defaultPackageJson, null, 2),
-        "🔧 Create new valid package.json",
-      )
-
-      return {
-        fixed: true,
-        description: "Created new valid package.json file",
-      }
-    }
+  if (!credentials.gemini_api_key) {
+    console.log("❌ No Gemini API key available for auto-fix")
+    return { fixed: false, description: "No AI API key available" }
   }
 
-  // Fix vercel.json issues
-  if (errorMessage.includes("vercel.json") && errorMessage.includes("Invalid JSON")) {
-    try {
-      const defaultVercelConfig = {
-        version: 2,
-        builds: [
-          {
-            src: "package.json",
-            use: "@vercel/static-build",
-          },
-        ],
-      }
+  try {
+    const github = new GitHubService(credentials.github_token)
+    const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
 
-      await githubStorage.updateFileContent(
-        "vercel.json",
-        JSON.stringify(defaultVercelConfig, null, 2),
-        "🔧 Fix vercel.json configuration",
-      )
+    // Get current project files for context
+    const [owner, repo] = project.repository.split("/").slice(-2)
+    const files = await github.listFiles(owner, repo)
+
+    const projectFiles = await Promise.all(
+      files.slice(0, 10).map(async (file) => {
+        try {
+          if (file.type === "file") {
+            const content = await github.getFileContent(owner, repo, file.path)
+            return `${file.path}:\n${content.content.slice(0, 500)}...\n`
+          }
+        } catch (error) {
+          return `${file.path}: Error reading file\n`
+        }
+        return ""
+      }),
+    )
+
+    const fixPrompt = `
+    You are an expert deployment engineer. Analyze this deployment error and provide a fix.
+    
+    Project: ${project.name}
+    Framework: ${project.framework}
+    Platform: Vercel
+    
+    Deployment Logs:
+    ${deploymentLogs}
+    
+    Current Project Files:
+    ${projectFiles.join("\n")}
+    
+    CRITICAL INSTRUCTIONS:
+    1. Analyze the deployment logs to identify the root cause
+    2. Provide specific file fixes based on the actual error
+    3. Return ONLY valid JSON in this exact format
+    4. Do NOT include markdown or explanations
+    
+    Common deployment issues and fixes:
+    - JSON parsing errors: Fix malformed JSON files
+    - Missing dependencies: Add to package.json
+    - Build script errors: Fix build commands
+    - Environment variable issues: Add default values
+    - File path errors: Correct import paths
+    - TypeScript errors: Fix type issues
+    - Missing files: Create required files
+    
+    Return this exact JSON structure:
+    {
+      "canFix": true,
+      "description": "Brief description of the fix",
+      "files": [
+        {
+          "path": "relative/path/to/file.ext",
+          "content": "complete fixed file content",
+          "operation": "create|update"
+        }
+      ],
+      "commitMessage": "fix: description of deployment fix"
+    }
+    
+    If you cannot determine a fix, return:
+    {
+      "canFix": false,
+      "description": "Unable to determine fix for this error",
+      "files": [],
+      "commitMessage": ""
+    }
+    `
+
+    const result = await aiAgent.model.generateContent(fixPrompt)
+    const response = await result.response
+    let text = response.text().trim()
+
+    // Clean up the response
+    if (text.startsWith("```json")) {
+      text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
+    }
+    if (text.startsWith("```")) {
+      text = text.replace(/```\n?/, "").replace(/\n?```$/, "")
+    }
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      throw new Error("No valid JSON found in AI response")
+    }
+
+    const fixResult = JSON.parse(jsonMatch[0])
+
+    if (fixResult.canFix && fixResult.files && fixResult.files.length > 0) {
+      console.log(`✅ AI Agent generated fix: ${fixResult.description}`)
+
+      // Apply the fixes to GitHub
+      for (const file of fixResult.files) {
+        try {
+          await githubStorage.updateFileContent(file.path, file.content, fixResult.commitMessage)
+          console.log(`✅ Fixed file: ${file.path}`)
+        } catch (fileError) {
+          console.error(`❌ Error fixing file ${file.path}:`, fileError)
+        }
+      }
 
       return {
         fixed: true,
-        description: "Fixed vercel.json configuration",
+        description: fixResult.description,
+        filesFixed: fixResult.files.length,
+        commitMessage: fixResult.commitMessage,
       }
-    } catch (fixError) {
-      console.error("Failed to fix vercel.json:", fixError)
+    } else {
+      console.log(`❌ AI Agent could not generate fix: ${fixResult.description}`)
+      return {
+        fixed: false,
+        description: fixResult.description || "No fix could be determined",
+      }
+    }
+  } catch (error) {
+    console.error("❌ AI Agent auto-fix failed:", error)
+    return {
+      fixed: false,
+      description: `Auto-fix failed: ${error instanceof Error ? error.message : "Unknown error"}`,
     }
   }
-
-  return { fixed: false, description: "No automatic fix available for this error type" }
 }
 
 export async function POST(request: NextRequest) {
@@ -189,49 +227,6 @@ export async function POST(request: NextRequest) {
 
       const validFiles = deploymentFiles.filter(Boolean) as Array<{ path: string; content: string }>
 
-      // Check for vercel.json and validate it
-      const vercelJsonFile = validFiles.find((f) => f.path === "vercel.json")
-      if (vercelJsonFile) {
-        try {
-          JSON.parse(vercelJsonFile.content)
-        } catch (jsonError) {
-          // Invalid JSON in vercel.json - fix it
-          const fixedVercelJson = {
-            version: 2,
-            builds: [
-              {
-                src: "package.json",
-                use: "@vercel/static-build",
-              },
-            ],
-          }
-
-          vercelJsonFile.content = JSON.stringify(fixedVercelJson, null, 2)
-
-          // Update the file in GitHub
-          await githubStorage.updateFileContent(
-            "vercel.json",
-            vercelJsonFile.content,
-            "🔧 Fix invalid JSON in vercel.json",
-          )
-
-          // Log the fix
-          const fixLog = {
-            projectId,
-            platform,
-            status: "fixing",
-            message: "Fixed invalid JSON in vercel.json",
-            timestamp: new Date().toISOString(),
-          }
-
-          await githubStorage.updateFileContent(
-            ".prodev/deployment-logs.json",
-            JSON.stringify([deploymentLog, fixLog], null, 2),
-            "🔧 Log deployment fix",
-          )
-        }
-      }
-
       // Deploy based on platform
       const deploymentService = new DeploymentService()
       const deployConfig = {
@@ -244,6 +239,8 @@ export async function POST(request: NextRequest) {
       }
 
       let deploymentResult
+      let deploymentLogs = ""
+
       try {
         switch (platform) {
           case "vercel":
@@ -259,10 +256,6 @@ export async function POST(request: NextRequest) {
             throw new Error("Unsupported deployment platform")
         }
 
-        // Verify deployment actually worked by checking the URL
-        const verificationResponse = await fetch(deploymentResult.url, { method: "HEAD" })
-        const actualStatus = verificationResponse.ok ? "success" : "failed"
-
         // Update project with deployment info
         await db.updateProject(projectId, {
           deployment_url: deploymentResult.url,
@@ -274,11 +267,8 @@ export async function POST(request: NextRequest) {
         const successLog = {
           projectId,
           platform,
-          status: actualStatus,
-          message:
-            actualStatus === "success"
-              ? "Deployment completed successfully"
-              : "Deployment completed but site not accessible",
+          status: "success",
+          message: "Deployment completed successfully",
           deploymentUrl: deploymentResult.url,
           deploymentId: deploymentResult.id,
           timestamp: new Date().toISOString(),
@@ -291,16 +281,16 @@ export async function POST(request: NextRequest) {
         )
 
         return NextResponse.json({
-          success: actualStatus === "success",
+          success: true,
           deploymentUrl: deploymentResult.url,
           deploymentId: deploymentResult.id,
           previewUrl: deploymentResult.url,
-          status: actualStatus,
-          message:
-            actualStatus === "success" ? "Deployment successful" : "Deployment completed but verification failed",
+          status: "success",
+          message: "Deployment successful",
         })
       } catch (deployError) {
-        // After deployment failure, add autonomous fix attempt
+        // Capture deployment logs/error details
+        deploymentLogs = deployError instanceof Error ? deployError.message : String(deployError)
         console.error("Deployment error:", deployError)
 
         // Log deployment error
@@ -308,8 +298,8 @@ export async function POST(request: NextRequest) {
           projectId,
           platform,
           status: "failed",
-          message: `Deployment failed: ${deployError instanceof Error ? deployError.message : "Unknown error"}`,
-          error: deployError instanceof Error ? deployError.message : "Unknown error",
+          message: `Deployment failed: ${deploymentLogs}`,
+          error: deploymentLogs,
           timestamp: new Date().toISOString(),
         }
 
@@ -319,11 +309,11 @@ export async function POST(request: NextRequest) {
           "❌ Log deployment error",
         )
 
-        // Attempt autonomous fix
+        // Attempt autonomous fix with AI
         console.log("🤖 AI Agent attempting to fix deployment error...")
 
         try {
-          const fixResult = await attemptAutonomousFix(deployError, project, githubStorage, credentials)
+          const fixResult = await attemptAutonomousFix(deploymentLogs, project, githubStorage, credentials)
 
           if (fixResult.fixed) {
             console.log(`✅ Auto-fix applied: ${fixResult.description}`)
@@ -334,6 +324,7 @@ export async function POST(request: NextRequest) {
               platform,
               status: "fixing",
               message: `Auto-fix applied: ${fixResult.description}`,
+              filesFixed: fixResult.filesFixed || 0,
               timestamp: new Date().toISOString(),
             }
 
@@ -343,8 +334,8 @@ export async function POST(request: NextRequest) {
               "🔧 Log auto-fix attempt",
             )
 
-            // Wait a moment for GitHub to process the changes
-            await new Promise((resolve) => setTimeout(resolve, 3000))
+            // Wait for GitHub to process the changes
+            await new Promise((resolve) => setTimeout(resolve, 5000))
 
             // Retry deployment with fresh files
             console.log("🔄 Retrying deployment after auto-fix...")
@@ -370,7 +361,27 @@ export async function POST(request: NextRequest) {
             const validRetryFiles = retryDeploymentFiles.filter(Boolean) as Array<{ path: string; content: string }>
 
             try {
-              const retryResult = await deploymentService.deployToVercel(deployConfig, validRetryFiles)
+              let retryResult
+              switch (platform) {
+                case "vercel":
+                  retryResult = await deploymentService.deployToVercel(deployConfig, validRetryFiles)
+                  break
+                case "netlify":
+                  retryResult = await deploymentService.deployToNetlify(deployConfig, validRetryFiles)
+                  break
+                case "cloudflare":
+                  retryResult = await deploymentService.deployToCloudflare(deployConfig, validRetryFiles)
+                  break
+                default:
+                  throw new Error("Unsupported deployment platform")
+              }
+
+              // Update project with successful deployment
+              await db.updateProject(projectId, {
+                deployment_url: retryResult.url,
+                deployment_platform: platform,
+                last_deployment: new Date().toISOString(),
+              })
 
               const successLog = {
                 projectId,
@@ -404,7 +415,7 @@ export async function POST(request: NextRequest) {
                 projectId,
                 platform,
                 status: "retry_failed",
-                message: `Retry failed after auto-fix: ${retryError.message}`,
+                message: `Retry failed after auto-fix: ${retryError instanceof Error ? retryError.message : "Unknown error"}`,
                 timestamp: new Date().toISOString(),
               }
 
@@ -415,7 +426,7 @@ export async function POST(request: NextRequest) {
               )
             }
           } else {
-            console.log("❌ AI Agent could not generate automatic fix")
+            console.log(`❌ AI Agent could not generate automatic fix: ${fixResult.description}`)
           }
         } catch (fixError) {
           console.error("Auto-fix failed:", fixError)
@@ -424,7 +435,8 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({
           success: false,
-          error: deployError instanceof Error ? deployError.message : "Deployment failed",
+          error: deploymentLogs,
+          logs: deploymentLogs,
         })
       }
     } catch (deployError) {

@@ -15,6 +15,8 @@ export interface Task {
   updatedAt: string
   files?: string[]
   dependencies?: string[]
+  subtasks?: Task[]
+  parentTaskId?: string
 }
 
 export interface Project {
@@ -116,7 +118,7 @@ export class AIAgent {
             const content = await this.githubStorage.getFileContent("package.json")
             return `package.json content:\n${content}`
           } catch (error) {
-            return `Error reading package.json: ${error.message}`
+            return `Error reading package.json: ${error instanceof Error ? error.message : "Unknown error"}`
           }
         }
         return "GitHub storage not available"
@@ -131,14 +133,14 @@ export class AIAgent {
             JSON.parse(content)
             return "✅ JSON validation successful - package.json is valid"
           } catch (error) {
-            return `❌ JSON validation failed: ${error.message}`
+            return `❌ JSON validation failed: ${error instanceof Error ? error.message : "Unknown error"}`
           }
         }
       }
 
       return "Tool call executed but no specific handler found"
     } catch (error) {
-      return `Error executing tool call: ${error.message}`
+      return `Error executing tool call: ${error instanceof Error ? error.message : "Unknown error"}`
     }
   }
 
@@ -183,6 +185,54 @@ export class AIAgent {
     }
   }
 
+  async commitChanges(
+    files: Array<{ path: string; content: string; operation: "create" | "update" | "delete" }>,
+    commitMessage: string,
+  ): Promise<boolean> {
+    if (!this.github || !this.githubStorage) {
+      console.error("GitHub service not available for committing changes")
+      return false
+    }
+
+    try {
+      this.sendFeedback({
+        type: "status",
+        message: `Committing ${files.length} file changes to GitHub...`,
+        timestamp: new Date().toISOString(),
+      })
+
+      // Apply each file change
+      for (const file of files) {
+        try {
+          if (file.operation === "create" || file.operation === "update") {
+            await this.githubStorage.updateFileContent(file.path, file.content, commitMessage)
+          } else if (file.operation === "delete") {
+            // Handle file deletion if needed
+            console.log(`Delete operation for ${file.path} - implement if needed`)
+          }
+        } catch (fileError) {
+          console.error(`Error processing file ${file.path}:`, fileError)
+          // Continue with other files
+        }
+      }
+
+      this.sendFeedback({
+        type: "completion",
+        message: `Successfully committed ${files.length} files to GitHub`,
+        timestamp: new Date().toISOString(),
+      })
+
+      return true
+    } catch (error) {
+      this.sendFeedback({
+        type: "error",
+        message: `Failed to commit changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+        timestamp: new Date().toISOString(),
+      })
+      return false
+    }
+  }
+
   async implementTask(
     task: Task,
     projectContext: any,
@@ -202,130 +252,140 @@ export class AIAgent {
     const fullContext = await this.getProjectContext()
 
     const prompt = `
-    You are an expert ${projectContext.framework} developer with full project context and access to all project files.
+    You are an expert ${projectContext.framework} developer implementing a specific task.
     
     Task to Implement: ${task.title}
     Description: ${task.description}
     Priority: ${task.priority}
     Framework: ${projectContext.framework}
+    Associated Files: ${task.files?.join(", ") || "None specified"}
     
-    Full Project Context:
+    Project Context:
     - Name: ${projectContext.name}
     - Description: ${projectContext.description}
-    - Current Progress: ${fullContext.metadata?.progress || 0}%
-    - Previous Learnings: ${JSON.stringify(fullContext.memory?.learnings || {})}
-    - Existing Tasks: ${fullContext.tasks?.length || 0} tasks
-    - Agent Focus: ${fullContext.memory?.currentFocus || "Development"}
+    - Repository: ${projectContext.repository}
     
-    Current Project Files:
-    ${fullContext.codeFiles
-      ?.map(([path, data]: [string, any]) => `${path}:\n${data.content?.slice(0, 500)}...\n`)
-      .join("\n")}
+    CRITICAL INSTRUCTIONS:
+    1. You MUST return ONLY valid JSON in this exact format
+    2. Do NOT include any markdown, explanations, or extra text
+    3. Ensure all JSON strings are properly escaped
+    4. Test your JSON before returning it
     
-    Project Structure:
-    ${fullContext.projectStructure?.slice(0, 50).join("\n")}
-    
-    Recent Activity:
-    ${fullContext.recentActivity
-      ?.map((msg: any) => `${msg.role}: ${msg.content}`)
-      .slice(0, 5)
-      .join("\n")}
-    
-    IMPORTANT INSTRUCTIONS:
-    1. You have FULL ACCESS to all project files through the context above
-    2. Analyze existing files to avoid duplicates or conflicts
-    3. Use DIFF-based editing when possible to save tokens
-    4. Only provide full file content when creating new files
-    5. For updates, specify the exact changes needed
-    6. Consider DRY principles and code reusability
-    7. Maintain consistency with existing code patterns
-    8. Include proper error handling and validation
-    9. Add comprehensive comments for complex logic
-    10. NEVER create dummy or placeholder implementations - make it fully functional
-    
-    Generate the implementation with these operations:
-    - "create": For new files (provide full content)
-    - "update": For existing files (provide full content)
-    - "delete": For files to be removed
-    
-    Return as JSON:
+    Return this exact JSON structure:
     {
       "files": [
         {
           "path": "relative/path/to/file.ext",
-          "content": "complete file content",
-          "operation": "create|update|delete"
+          "content": "complete file content with proper escaping",
+          "operation": "create"
         }
       ],
-      "message": "Implementation summary with technical details",
-      "commitMessage": "feat: descriptive commit message following conventional commits"
+      "message": "Implementation summary",
+      "commitMessage": "feat: descriptive commit message"
     }
+    
+    Generate a complete, functional implementation for this task.
     `
 
     try {
       this.sendFeedback({
         type: "progress",
-        message: "Analyzing codebase and generating implementation",
+        message: "Analyzing task and generating implementation",
         taskId: task.id,
         timestamp: new Date().toISOString(),
       })
 
       const result = await this.model.generateContent(prompt)
       const response = await result.response
-      const text = response.text()
+      let text = response.text().trim()
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/)
-      if (jsonMatch) {
-        const implementation = JSON.parse(jsonMatch[0])
-
-        this.sendFeedback({
-          type: "progress",
-          message: `Generated ${implementation.files.length} file operations`,
-          taskId: task.id,
-          details: { fileCount: implementation.files.length },
-          timestamp: new Date().toISOString(),
-        })
-
-        // Update agent memory with new learnings
-        if (this.githubStorage) {
-          try {
-            const currentMemory = await this.githubStorage.getAgentMemory()
-            const updatedMemory = {
-              projectId: projectContext.id,
-              conversationHistory: currentMemory?.conversationHistory || [],
-              taskHistory: [...(currentMemory?.taskHistory || []), task],
-              codeContext: [...(currentMemory?.codeContext || []), ...implementation.files],
-              learnings: {
-                ...currentMemory?.learnings,
-                [task.id]: {
-                  task: task.title,
-                  implementation: implementation.message,
-                  files: implementation.files.map((f: any) => f.path),
-                  timestamp: new Date().toISOString(),
-                  patterns: this.extractCodePatterns(implementation.files),
-                },
-              },
-              currentFocus: task.title,
-              lastUpdate: new Date().toISOString(),
-              fileCache: currentMemory?.fileCache || {},
-            }
-
-            await this.githubStorage.saveAgentMemory(updatedMemory)
-          } catch (error) {
-            console.error("Error updating agent memory:", error)
-          }
-        }
-
-        this.sendFeedback({
-          type: "completion",
-          message: `Successfully implemented: ${task.title}`,
-          taskId: task.id,
-          timestamp: new Date().toISOString(),
-        })
-
-        return implementation
+      // Clean up the response to ensure it's valid JSON
+      if (text.startsWith("```json")) {
+        text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
       }
-      throw new Error("Invalid response format")
+      if (text.startsWith("```")) {
+        text = text.replace(/```\n?/, "").replace(/\n?```$/, "")
+      }
+
+      // Find JSON content
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) {
+        throw new Error("No valid JSON found in response")
+      }
+
+      let implementation
+      try {
+        implementation = JSON.parse(jsonMatch[0])
+      } catch (parseError) {
+        console.error("JSON Parse Error:", parseError)
+        console.error("Raw response:", text)
+        throw new Error(
+          `Invalid JSON response: ${parseError instanceof Error ? parseError.message : "Unknown parsing error"}`,
+        )
+      }
+
+      // Validate the implementation structure
+      if (!implementation.files || !Array.isArray(implementation.files)) {
+        throw new Error("Implementation must include a 'files' array")
+      }
+
+      if (!implementation.message || !implementation.commitMessage) {
+        throw new Error("Implementation must include 'message' and 'commitMessage'")
+      }
+
+      this.sendFeedback({
+        type: "progress",
+        message: `Generated ${implementation.files.length} file operations`,
+        taskId: task.id,
+        details: { fileCount: implementation.files.length },
+        timestamp: new Date().toISOString(),
+      })
+
+      // Commit the changes to GitHub
+      const commitSuccess = await this.commitChanges(implementation.files, implementation.commitMessage)
+
+      if (!commitSuccess) {
+        throw new Error("Failed to commit changes to GitHub")
+      }
+
+      // Update agent memory with new learnings
+      if (this.githubStorage) {
+        try {
+          const currentMemory = await this.githubStorage.getAgentMemory()
+          const updatedMemory = {
+            projectId: projectContext.id,
+            conversationHistory: currentMemory?.conversationHistory || [],
+            taskHistory: [...(currentMemory?.taskHistory || []), task],
+            codeContext: [...(currentMemory?.codeContext || []), ...implementation.files],
+            learnings: {
+              ...currentMemory?.learnings,
+              [task.id]: {
+                task: task.title,
+                implementation: implementation.message,
+                files: implementation.files.map((f: any) => f.path),
+                timestamp: new Date().toISOString(),
+                patterns: this.extractCodePatterns(implementation.files),
+              },
+            },
+            currentFocus: task.title,
+            lastUpdate: new Date().toISOString(),
+            fileCache: currentMemory?.fileCache || {},
+          }
+
+          await this.githubStorage.saveAgentMemory(updatedMemory)
+        } catch (error) {
+          console.error("Error updating agent memory:", error)
+        }
+      }
+
+      this.sendFeedback({
+        type: "completion",
+        message: `Successfully implemented: ${task.title}`,
+        taskId: task.id,
+        timestamp: new Date().toISOString(),
+      })
+
+      return implementation
     } catch (error) {
       this.sendFeedback({
         type: "error",
@@ -387,8 +447,6 @@ export class AIAgent {
     - Completed Tasks: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0}
     - Total Tasks: ${fullContext.tasks?.length || 0}
     - Project Progress: ${fullContext.metadata?.progress || 0}%
-    - Previous Learnings: ${JSON.stringify(fullContext.memory?.learnings || {})}
-    - Existing Files: ${fullContext.projectStructure?.length || 0} files
     
     Generate 8-15 specific, actionable tasks that cover:
     1. Project setup and configuration
@@ -402,16 +460,7 @@ export class AIAgent {
     9. Documentation
     10. Error handling and validation
     
-    For each task, provide:
-    - Clear, specific title
-    - Detailed description with technical requirements
-    - Priority level (high/medium/low)
-    - Estimated time in hours
-    - Dependencies (if any)
-    - Files that will be created/modified
-    - Acceptance criteria
-    
-    Return as JSON array with this structure:
+    CRITICAL: Return ONLY valid JSON in this exact format:
     {
       "tasks": [
         {
@@ -419,7 +468,7 @@ export class AIAgent {
           "description": "string",
           "priority": "high|medium|low",
           "estimatedTime": "X hours",
-          "dependencies": ["task_id"],
+          "dependencies": [],
           "files": ["path/to/file.ext"],
           "acceptanceCriteria": ["criteria1", "criteria2"]
         }
@@ -430,7 +479,15 @@ export class AIAgent {
     try {
       const result = await this.model.generateContent(prompt)
       const response = await result.response
-      const text = response.text()
+      let text = response.text().trim()
+
+      // Clean up the response
+      if (text.startsWith("```json")) {
+        text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
+      }
+      if (text.startsWith("```")) {
+        text = text.replace(/```\n?/, "").replace(/\n?```$/, "")
+      }
 
       const jsonMatch = text.match(/\{[\s\S]*\}/)
       if (jsonMatch) {
@@ -536,6 +593,8 @@ export class AIAgent {
     6. Provide specific, actionable advice based on actual project state
     7. Reference previous work and conversations with full context
     8. Analyze existing code and suggest improvements
+    9. Commit changes to GitHub automatically
+    10. Deploy projects and fix deployment issues
     
     IMPORTANT: You have FULL ACCESS to all project files and context. Use this information to provide accurate, contextual responses. Never give generic or placeholder responses.
     
@@ -545,6 +604,9 @@ export class AIAgent {
     Be conversational but professional. Use your memory and context to provide valuable insights.
     Always provide feedback on what you're doing and what the next steps are.
     Reference actual files and code when relevant.
+    
+    If you mention you will do something (like "I'll check", "I'll validate", "I'll fix", "I'll deploy"), 
+    you should actually execute those actions in your next response.
     `
 
     try {

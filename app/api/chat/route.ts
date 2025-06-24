@@ -1,8 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/database"
-import { AIAgent } from "@/lib/ai-agent"
 import { GitHubService } from "@/lib/github"
 import { GitHubStorageService } from "@/lib/github-storage"
+import { AIAgent } from "@/lib/ai-agent"
 
 function getUserFromSession(request: NextRequest) {
   try {
@@ -11,38 +11,6 @@ function getUserFromSession(request: NextRequest) {
     return JSON.parse(sessionCookie)
   } catch {
     return null
-  }
-}
-
-// Add web search function at the top
-async function searchWeb(query: string): Promise<string> {
-  try {
-    // Using DuckDuckGo Instant Answer API
-    const response = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
-    )
-    const data = await response.json()
-
-    let searchResults = ""
-    if (data.AbstractText) {
-      searchResults += `Abstract: ${data.AbstractText}\n`
-    }
-    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
-      searchResults += "\nRelated Information:\n"
-      data.RelatedTopics.slice(0, 3).forEach((topic: any, index: number) => {
-        if (topic.Text) {
-          searchResults += `${index + 1}. ${topic.Text}\n`
-        }
-      })
-    }
-    if (data.Answer) {
-      searchResults += `\nDirect Answer: ${data.Answer}\n`
-    }
-
-    return searchResults || "No relevant information found."
-  } catch (error) {
-    console.error("Web search error:", error)
-    return "Web search temporarily unavailable."
   }
 }
 
@@ -79,22 +47,15 @@ export async function GET(request: NextRequest) {
     try {
       const memory = await githubStorage.getAgentMemory()
       const messages = memory?.conversationHistory || []
-
-      return NextResponse.json({
-        success: true,
-        messages: messages.slice(-50), // Return last 50 messages
-      })
+      return NextResponse.json({ success: true, messages })
     } catch (error) {
-      return NextResponse.json({
-        success: true,
-        messages: [], // Return empty if no history
-      })
+      return NextResponse.json({ success: true, messages: [] })
     }
   } catch (error) {
     console.error("Chat GET API error:", error)
     return NextResponse.json({
       success: false,
-      error: error instanceof Error ? error.message : "Failed to load chat history",
+      error: error instanceof Error ? error.message : "Failed to get chat history",
     })
   }
 }
@@ -106,7 +67,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const { projectId, action, message, conversationHistory, taskId, replyTo } = await request.json()
+    const { projectId, action, message, conversationHistory, replyTo } = await request.json()
+
+    if (!projectId) {
+      return NextResponse.json({ success: false, error: "Project ID required" })
+    }
 
     // Get project and verify ownership
     const project = await db.getProject(projectId)
@@ -115,12 +80,7 @@ export async function POST(request: NextRequest) {
     }
 
     const credentials = await db.getCredentials(user.id)
-    if (!credentials) {
-      return NextResponse.json({ success: false, error: "Credentials not found" })
-    }
-
-    // Initialize AI agent with GitHub access
-    if (!credentials.github_token) {
+    if (!credentials?.github_token) {
       return NextResponse.json({ success: false, error: "GitHub credentials required" })
     }
 
@@ -132,189 +92,32 @@ export async function POST(request: NextRequest) {
     const [owner, repo] = project.repository.split("/").slice(-2)
     const githubStorage = new GitHubStorageService(github, owner, repo)
 
-    // Refresh file cache to ensure AI has latest files
-    await githubStorage.refreshCache()
-
     const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
 
     try {
       switch (action) {
         case "chat":
           const response = await aiAgent.chatResponse(message, project, conversationHistory || [])
+          return NextResponse.json({ success: true, response })
 
-          // Check if response contains tool calls that need execution
-          if (response.includes("```tool_code")) {
-            // Extract and execute tool calls
-            const toolCallMatches = response.match(/```tool_code\n(.*?)\n```/gs)
-            let finalResponse = response
-
-            if (toolCallMatches) {
-              for (const toolCallMatch of toolCallMatches) {
-                const toolCall = toolCallMatch.replace(/```tool_code\n|\n```/g, "")
-                let toolResult = ""
-
-                try {
-                  // Execute different types of tool calls
-                  if (toolCall.includes("web_search.search")) {
-                    const queryMatch = toolCall.match(/queries=\["([^"]+)"\]/)
-                    if (queryMatch) {
-                      const query = queryMatch[1]
-                      toolResult = await searchWeb(query)
-                    }
-                  } else if (toolCall.includes('files["package.json"]')) {
-                    try {
-                      const content = await githubStorage.getFileContent("package.json")
-                      toolResult = `package.json content:\n${content}`
-                    } catch (error) {
-                      toolResult = `Error reading package.json: ${error.message}`
-                    }
-                  } else if (toolCall.includes('files["vercel.json"]')) {
-                    try {
-                      const content = await githubStorage.getFileContent("vercel.json")
-                      toolResult = `vercel.json content:\n${content}`
-                    } catch (error) {
-                      toolResult = `Error reading vercel.json: ${error.message}`
-                    }
-                  } else if (toolCall.includes("JSON.parse")) {
-                    try {
-                      const content = await githubStorage.getFileContent("package.json")
-                      JSON.parse(content)
-                      toolResult = "✅ JSON validation successful - package.json is valid"
-                    } catch (error) {
-                      toolResult = `❌ JSON validation failed: ${error.message}`
-                    }
-                  }
-
-                  // Generate follow-up response with tool results
-                  const followUpPrompt = `
-                  Previous response: ${response}
-                  Tool execution result: ${toolResult}
-                  
-                  Continue the conversation naturally, incorporating the tool results and proceeding with the next logical step. 
-                  If you mentioned you would do something, now actually do it based on the tool results.
-                  Be specific and actionable in your response.
-                  `
-
-                  const followUpResponse = await aiAgent.chatResponse(
-                    followUpPrompt,
-                    project,
-                    conversationHistory || [],
-                  )
-                  finalResponse = followUpResponse
-                } catch (toolError) {
-                  console.error("Tool execution error:", toolError)
-                  toolResult = `Error executing tool: ${toolError.message}`
-                }
-              }
-            }
-
-            return NextResponse.json({
-              success: true,
-              response: finalResponse,
-              toolExecuted: true,
-            })
-          }
-
-          // Handle special chat commands
-          if (message.toLowerCase().includes("create task")) {
-            // Extract task details and create task
-            const taskTitle = message.match(/create task[:\s]+(.+)/i)?.[1] || "New Task"
-            const newTask = {
-              id: `task_${Date.now()}`,
-              title: taskTitle,
-              description: `Task created from chat: ${message}`,
-              status: "pending",
-              priority: "medium",
-              type: "manual",
-              estimatedTime: "2 hours",
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            }
-
-            await githubStorage.createTask(newTask)
-
-            return NextResponse.json({
-              success: true,
-              response: `${response}\n\n✅ Task created: "${taskTitle}"`,
-              taskCreated: true,
-            })
-          }
-
-          if (message.toLowerCase().includes("implement") && message.toLowerCase().includes("task")) {
-            // Get tasks and implement them
-            const tasks = await githubStorage.getTasks()
-            const pendingTasks = tasks.filter((t) => t.status === "pending")
-
-            if (pendingTasks.length > 0) {
-              const taskToImplement = pendingTasks[0]
-
-              try {
-                const implementation = await aiAgent.implementTask(taskToImplement, project)
-
-                // Apply the implementation to GitHub
-                for (const file of implementation.files) {
-                  if (file.operation === "create" || file.operation === "update") {
-                    await githubStorage.updateFileContent(file.path, file.content, implementation.commitMessage)
-                  }
-                }
-
-                // Mark task as completed
-                await githubStorage.updateTask(taskToImplement.id, { status: "completed" })
-
-                return NextResponse.json({
-                  success: true,
-                  response: `${response}\n\n✅ Task implemented: "${taskToImplement.title}"\n\nFiles updated:\n${implementation.files.map((f) => `- ${f.path}`).join("\n")}`,
-                  taskImplemented: true,
-                })
-              } catch (error) {
-                return NextResponse.json({
-                  success: true,
-                  response: `${response}\n\n❌ Failed to implement task: ${error instanceof Error ? error.message : "Unknown error"}`,
-                })
-              }
-            }
-          }
-
-          // Handle deployment commands
-          if (message.toLowerCase().includes("deploy") || message.toLowerCase().includes("fix deployment")) {
-            try {
-              const deployResponse = await fetch("/api/deploy", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  projectId,
-                  platform: "vercel",
-                }),
-              })
-
-              const deployData = await deployResponse.json()
-
-              if (deployData.success) {
-                return NextResponse.json({
-                  success: true,
-                  response: `${response}\n\n✅ Deployment successful!\nURL: ${deployData.deploymentUrl}`,
-                  deployed: true,
-                })
-              } else {
-                return NextResponse.json({
-                  success: true,
-                  response: `${response}\n\n❌ Deployment failed: ${deployData.error}`,
-                })
-              }
-            } catch (error) {
-              return NextResponse.json({
-                success: true,
-                response: `${response}\n\n❌ Deployment error: ${error.message}`,
-              })
-            }
-          }
-
+        case "autonomous_followup":
+          // Handle autonomous follow-up actions
+          const followUpResponse = await handleAutonomousFollowUp(
+            message,
+            conversationHistory,
+            aiAgent,
+            project,
+            githubStorage,
+            github,
+          )
           return NextResponse.json({
             success: true,
-            response,
+            response: followUpResponse.response,
+            needsMoreFollowUp: followUpResponse.needsMoreFollowUp,
           })
 
         case "implement_task":
+          const { taskId } = await request.json()
           if (!taskId) {
             return NextResponse.json({ success: false, error: "Task ID required" })
           }
@@ -326,15 +129,11 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ success: false, error: "Task not found" })
           }
 
+          // Mark task as in-progress
+          await githubStorage.updateTask(taskId, { status: "in-progress" })
+
           try {
             const implementation = await aiAgent.implementTask(task, project)
-
-            // Apply the implementation to GitHub
-            for (const file of implementation.files) {
-              if (file.operation === "create" || file.operation === "update") {
-                await githubStorage.updateFileContent(file.path, file.content, implementation.commitMessage)
-              }
-            }
 
             // Mark task as completed
             await githubStorage.updateTask(taskId, { status: "completed" })
@@ -345,109 +144,38 @@ export async function POST(request: NextRequest) {
               message: "Task implemented successfully",
             })
           } catch (error) {
+            // Mark task as failed
+            await githubStorage.updateTask(taskId, { status: "failed" })
+            throw error
+          }
+
+        case "deploy":
+          // Handle deployment from chat
+          const deployResponse = await fetch(`${request.url.replace("/api/chat", "/api/deploy")}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ projectId, platform: "vercel" }),
+          })
+
+          const deployResult = await deployResponse.json()
+
+          if (deployResult.success) {
             return NextResponse.json({
-              success: false,
-              error: error instanceof Error ? error.message : "Implementation failed",
+              success: true,
+              response: `🚀 Deployment successful! Your app is live at: ${deployResult.deploymentUrl}`,
+            })
+          } else {
+            return NextResponse.json({
+              success: true,
+              response: `❌ Deployment failed: ${deployResult.error}. I'm working on fixing this automatically...`,
             })
           }
-
-        case "implement_all":
-          const allTasks = await githubStorage.getTasks()
-          const pendingTasks = allTasks.filter((t) => t.status === "pending")
-          const results = []
-
-          for (const task of pendingTasks.slice(0, 5)) {
-            // Limit to 5 tasks at once
-            try {
-              const implementation = await aiAgent.implementTask(task, project)
-
-              // Apply the implementation to GitHub
-              for (const file of implementation.files) {
-                if (file.operation === "create" || file.operation === "update") {
-                  await githubStorage.updateFileContent(file.path, file.content, implementation.commitMessage)
-                }
-              }
-
-              // Mark task as completed
-              await githubStorage.updateTask(task.id, { status: "completed" })
-
-              results.push({
-                taskId: task.id,
-                title: task.title,
-                status: "completed",
-                files: implementation.files.length,
-              })
-            } catch (error) {
-              results.push({
-                taskId: task.id,
-                title: task.title,
-                status: "failed",
-                error: error instanceof Error ? error.message : "Unknown error",
-              })
-            }
-          }
-
-          return NextResponse.json({
-            success: true,
-            results,
-            message: `Processed ${results.length} tasks`,
-          })
-
-        case "autonomous_followup":
-          // Get project files for context
-          const memory = await githubStorage.getAgentMemory()
-          const files = memory?.fileCache || {}
-
-          // Check if the previous message mentioned specific actions
-          const lastMessage = conversationHistory[conversationHistory.length - 1]?.content || ""
-
-          let followUpResponse = ""
-          let needsMoreFollowUp = false
-
-          if (lastMessage.includes("JSON validator") || lastMessage.includes("validate")) {
-            // Perform JSON validation
-            try {
-              const packageJsonContent = files["package.json"]?.content
-              if (packageJsonContent) {
-                JSON.parse(packageJsonContent)
-                followUpResponse =
-                  "✅ package.json validation successful - the JSON is valid. The deployment error might be due to encoding issues during upload. Let me check the vercel.json file as well."
-                needsMoreFollowUp = true
-              }
-            } catch (error) {
-              followUpResponse = `❌ Found JSON syntax error in package.json: ${error.message}. I'll fix this now.`
-              needsMoreFollowUp = true
-            }
-          } else if (lastMessage.includes("inspect") || lastMessage.includes("examine")) {
-            // Inspect files mentioned
-            const packageJsonContent = files["package.json"]?.content
-            const vercelJsonContent = files["vercel.json"]?.content
-
-            followUpResponse = `📋 File inspection results:
-
-package.json status: ${packageJsonContent ? "Found" : "Missing"}
-vercel.json status: ${vercelJsonContent ? "Found" : "Missing"}
-
-The deployment error suggests the package.json is being base64 encoded during upload. This typically happens when there are encoding issues. Let me fix the deployment configuration.`
-            needsMoreFollowUp = true
-          } else if (lastMessage.includes("search")) {
-            // Perform web search
-            const searchQuery = message.match(/search.*?for\s+(.+)/i)?.[1] || "JSON validator online"
-            const searchResults = await searchWeb(searchQuery)
-            followUpResponse = `🔍 Web search results for "${searchQuery}":\n\n${searchResults}`
-          }
-
-          return NextResponse.json({
-            success: true,
-            response: followUpResponse,
-            needsMoreFollowUp,
-          })
 
         default:
           return NextResponse.json({ success: false, error: "Invalid action" })
       }
     } catch (error) {
-      console.error("Chat POST API error:", error)
+      console.error("Chat API error:", error)
       return NextResponse.json({
         success: false,
         error: error instanceof Error ? error.message : "Failed to process chat request",
@@ -459,5 +187,181 @@ The deployment error suggests the package.json is being base64 encoded during up
       success: false,
       error: error instanceof Error ? error.message : "Failed to process request",
     })
+  }
+}
+
+async function handleAutonomousFollowUp(
+  message: string,
+  conversationHistory: any[],
+  aiAgent: AIAgent,
+  project: any,
+  githubStorage: GitHubStorageService,
+  github: GitHubService,
+): Promise<{ response: string; needsMoreFollowUp: boolean }> {
+  // Get the last agent message to understand what it planned to do
+  const lastAgentMessage = conversationHistory.filter((msg) => msg.role === "agent").pop()?.content || ""
+
+  let response = ""
+  let needsMoreFollowUp = false
+
+  try {
+    // Check what the agent said it would do and execute it
+    if (lastAgentMessage.includes("I'll check") || lastAgentMessage.includes("I'll examine")) {
+      // Execute file checking/examination
+      if (lastAgentMessage.includes("package.json")) {
+        try {
+          const packageContent = await githubStorage.getFileContent("package.json")
+          const isValidJson = (() => {
+            try {
+              JSON.parse(packageContent)
+              return true
+            } catch {
+              return false
+            }
+          })()
+
+          response = `✅ Examined package.json:\n- File exists: Yes\n- Valid JSON: ${isValidJson ? "Yes" : "No"}\n- Size: ${packageContent.length} characters`
+
+          if (!isValidJson) {
+            response += "\n\n❌ Found JSON parsing issue. I'll fix this now..."
+            needsMoreFollowUp = true
+          }
+        } catch (error) {
+          response = `❌ Error examining package.json: ${error instanceof Error ? error.message : "Unknown error"}`
+        }
+      }
+    }
+
+    if (lastAgentMessage.includes("I'll fix") || lastAgentMessage.includes("I'll validate")) {
+      // Execute fixing actions
+      response = "🔧 Applying fixes to the codebase...\n"
+
+      try {
+        // Get current files and apply basic fixes
+        const files = await github.listFiles(
+          project.repository.split("/").slice(-2)[0],
+          project.repository.split("/").slice(-2)[1],
+        )
+
+        // Check for common issues and fix them
+        let fixesApplied = 0
+
+        for (const file of files.slice(0, 5)) {
+          // Limit to prevent timeout
+          if (
+            file.type === "file" &&
+            (file.path.endsWith(".json") || file.path.endsWith(".js") || file.path.endsWith(".ts"))
+          ) {
+            try {
+              const content = await github.getFileContent(
+                project.repository.split("/").slice(-2)[0],
+                project.repository.split("/").slice(-2)[1],
+                file.path,
+              )
+
+              // Basic JSON validation and fixing
+              if (file.path.endsWith(".json")) {
+                try {
+                  JSON.parse(content.content)
+                } catch (jsonError) {
+                  // Try to fix common JSON issues
+                  const fixedContent = content.content
+                    .replace(/,(\s*[}\]])/g, "$1") // Remove trailing commas
+                    .replace(/'/g, '"') // Replace single quotes with double quotes
+
+                  try {
+                    JSON.parse(fixedContent)
+                    await githubStorage.updateFileContent(file.path, fixedContent, `🔧 Fix JSON syntax in ${file.path}`)
+                    fixesApplied++
+                    response += `✅ Fixed JSON syntax in ${file.path}\n`
+                  } catch {
+                    response += `❌ Could not auto-fix ${file.path}\n`
+                  }
+                }
+              }
+            } catch (error) {
+              // Continue with other files
+            }
+          }
+        }
+
+        response += `\n🎉 Applied ${fixesApplied} fixes to the codebase.`
+
+        if (fixesApplied > 0) {
+          response += "\n\nFiles have been committed to GitHub. Ready for deployment!"
+        }
+      } catch (error) {
+        response += `\n❌ Error during fixing: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    if (lastAgentMessage.includes("I'll deploy") || lastAgentMessage.includes("I'll redeploy")) {
+      // Execute deployment
+      response = "🚀 Starting deployment...\n"
+
+      try {
+        // Trigger deployment
+        const deployResponse = await fetch("/api/deploy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: project.id, platform: "vercel" }),
+        })
+
+        const deployResult = await deployResponse.json()
+
+        if (deployResult.success) {
+          response += `✅ Deployment successful!\n🌐 Live URL: ${deployResult.deploymentUrl}`
+        } else {
+          response += `❌ Deployment failed: ${deployResult.error}\n\nI'll analyze the error and try to fix it...`
+          needsMoreFollowUp = true
+        }
+      } catch (error) {
+        response += `❌ Deployment error: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    if (lastAgentMessage.includes("I'll search") || lastAgentMessage.includes("I'll look up")) {
+      // Execute web search
+      const searchQuery =
+        lastAgentMessage.match(/search.*?for\s+(.+?)(?:\.|$)/i)?.[1] ||
+        lastAgentMessage.match(/look up\s+(.+?)(?:\.|$)/i)?.[1] ||
+        "deployment best practices"
+
+      response = `🔍 Searching for: ${searchQuery}\n\n`
+
+      try {
+        const searchResults = await aiAgent.searchWeb(searchQuery)
+        response += searchResults
+      } catch (error) {
+        response += `❌ Search error: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    // If no specific action was detected, provide a general follow-up
+    if (!response) {
+      response =
+        "I'm continuing to work on your request. Let me analyze the current state and proceed with the next steps..."
+
+      // Get project status and provide relevant next steps
+      try {
+        const tasks = await githubStorage.getTasks()
+        const pendingTasks = tasks.filter((t) => t.status === "pending")
+
+        if (pendingTasks.length > 0) {
+          response += `\n\n📋 I found ${pendingTasks.length} pending tasks. Would you like me to implement them?`
+        } else {
+          response += "\n\n✅ All tasks are completed. Ready for deployment or additional features!"
+        }
+      } catch (error) {
+        response += "\n\nI'm ready to help with your next request!"
+      }
+    }
+
+    return { response, needsMoreFollowUp }
+  } catch (error) {
+    return {
+      response: `❌ Error during autonomous follow-up: ${error instanceof Error ? error.message : "Unknown error"}`,
+      needsMoreFollowUp: false,
+    }
   }
 }
