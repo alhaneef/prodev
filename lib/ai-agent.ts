@@ -960,140 +960,132 @@ Last Modified: ${fileInfo.lastModified}`
     // Enhanced intelligence for understanding user intent
     const userIntent = this.analyzeUserIntent(message, conversationHistory)
 
+    // Get full context including cached files and codebase index
+    const fullContext = await this.getProjectContext()
+
+    // Enhanced contextual understanding
+    const contextualInsights = this.generateContextualInsights(fullContext, userIntent)
+
     // Check if user is asking for web search
-    const needsWebSearch =
-      userIntent.needsWebSearch ||
-      message.toLowerCase().includes("search") ||
-      message.toLowerCase().includes("look up") ||
-      message.toLowerCase().includes("find information about") ||
-      message.toLowerCase().includes("how to") ||
-      message.toLowerCase().includes("what is")
+    const needsWebSearch = userIntent.needsWebSearch
 
     let webSearchResults = ""
     if (needsWebSearch) {
       this.sendFeedback({
         type: "status",
-        message: "Searching the web for relevant information",
+        message: "Searching for relevant information",
         timestamp: new Date().toISOString(),
       })
-
       webSearchResults = await this.searchWeb(message)
     }
 
-    // Get full context including cached files and codebase index
-    const fullContext = await this.getProjectContext()
-
-    // Enhanced prompt with better intelligence and context awareness
+    // Enhanced prompt with superior intelligence and context awareness
     const prompt = `
-    You are an advanced AI development agent with deep project understanding, contextual memory, and intelligent reasoning capabilities.
-    
-    PROJECT INTELLIGENCE:
-    - Name: ${projectContext.name}
-    - Framework: ${projectContext.framework}
-    - Description: ${projectContext.description}
-    - Status: ${projectContext.status}
-    - Progress: ${projectContext.progress || 0}%
-    
-    CODEBASE INTELLIGENCE:
-    - Total Files: ${Object.keys(fullContext.codebaseIndex?.files || {}).length}
-    - Key Components: ${Object.values(fullContext.codebaseIndex?.files || {})
-      .filter((f) => f.language === "typescript" && f.exports.length > 0)
-      .map((f) => f.exports.join(", "))
-      .slice(0, 10)
-      .join(", ")}
-    - Recent Changes: ${fullContext.memory?.learnings ? Object.keys(fullContext.memory.learnings).slice(-3).join(", ") : "None"}
-    
-    CONTEXTUAL MEMORY:
-    - Current Focus: ${fullContext.memory?.currentFocus || "Development"}
-    - Recent Tasks: ${JSON.stringify(fullContext.tasks?.slice(-5) || [])}
-    - Task Status: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0} completed, ${fullContext.tasks?.filter((t: any) => t.status === "pending").length || 0} pending
-    - Key Learnings: ${JSON.stringify(fullContext.memory?.learnings || {})}
-    - Project Files: ${fullContext.projectStructure?.length || 0} files indexed
-    
-    CONVERSATION CONTEXT:
-    ${conversationHistory
-      .slice(-10)
-      .map((msg) => `${msg.role}: ${msg.content}`)
-      .join("\n")}
-    
-    USER INTENT ANALYSIS:
-    - Intent Type: ${userIntent.type}
-    - Confidence: ${userIntent.confidence}
-    - Suggested Actions: ${userIntent.suggestedActions.join(", ")}
-    - Context Clues: ${userIntent.contextClues.join(", ")}
-    
-    ${webSearchResults ? `WEB SEARCH RESULTS: ${webSearchResults}` : ""}
-    
-    CURRENT USER MESSAGE: ${message}
-    
-    ADVANCED CAPABILITIES:
-    1. Deep codebase understanding with file indexing and dependency mapping
-    2. Contextual memory of all previous interactions and implementations
-    3. Intelligent task creation and management based on project needs
-    4. Real-time web search and information gathering
-    5. Website scraping for additional context
-    6. Autonomous code implementation with GitHub integration
-    7. Smart error detection and automatic fixing
-    8. Deployment automation with error recovery
-    9. Pattern recognition and learning from past implementations
-    10. Proactive suggestions based on project analysis
-    
-    INTELLIGENT RESPONSE GUIDELINES:
-    1. Understand the user's true intent, not just literal words
-    2. Provide contextual responses based on project state and history
-    3. Suggest proactive actions that would benefit the project
-    4. Reference specific files, functions, and code patterns when relevant
-    5. Offer multiple approaches when appropriate
-    6. Anticipate follow-up questions and provide comprehensive answers
-    7. Use project-specific terminology and maintain consistency
-    8. Learn from previous interactions to improve responses
-    
-    AUTONOMOUS ACTION TRIGGERS:
-    - If user mentions creating tasks, offer to create and implement them
-    - If user asks about code, analyze the actual codebase and provide specific insights
-    - If user mentions problems, proactively suggest solutions
-    - If user asks about deployment, check current status and offer assistance
-    - If user needs information, search the web and provide comprehensive answers
-    
-    RESPONSE REQUIREMENTS:
-    - Be conversational but professional and knowledgeable
-    - Provide specific, actionable advice based on actual project state
-    - Reference real files, functions, and code when relevant
-    - Offer to take autonomous actions when appropriate
-    - Show understanding of project context and history
-    - Anticipate needs and provide proactive suggestions
-    
-    Generate an intelligent, contextual response that demonstrates deep understanding of the project and user needs.
-    `
+  You are an advanced AI development agent with exceptional intelligence, deep project understanding, and superior contextual reasoning.
+  
+  PROJECT INTELLIGENCE MATRIX:
+  - Name: ${projectContext.name}
+  - Framework: ${projectContext.framework} 
+  - Description: ${projectContext.description}
+  - Status: ${projectContext.status}
+  - Progress: ${projectContext.progress || 0}%
+  - Repository: ${projectContext.repository}
+  
+  ADVANCED CODEBASE INTELLIGENCE:
+  - Total Files: ${Object.keys(fullContext.codebaseIndex?.files || {}).length}
+  - Languages: ${Object.values(fullContext.codebaseIndex?.files || {})
+    .map((f) => f.language)
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .join(", ")}
+  - Key Components: ${Object.values(fullContext.codebaseIndex?.files || {})
+    .filter((f) => f.language === "typescript" && f.exports.length > 0)
+    .map((f) => f.exports.join(", "))
+    .slice(0, 10)
+    .join(", ")}
+  - Dependencies: ${Object.values(fullContext.codebaseIndex?.dependencies || {})
+    .flat()
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .slice(0, 15)
+    .join(", ")}
+  
+  CONTEXTUAL MEMORY & INTELLIGENCE:
+  - Current Focus: ${fullContext.memory?.currentFocus || "Development"}
+  - Task Analytics: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0} completed, ${fullContext.tasks?.filter((t: any) => t.status === "pending").length || 0} pending, ${fullContext.tasks?.filter((t: any) => t.status === "failed").length || 0} failed
+  - Recent Implementations: ${Object.keys(fullContext.memory?.learnings || {})
+    .slice(-3)
+    .join(", ")}
+  - User Patterns: ${fullContext.memory?.userPreferences?.commonRequests?.join(", ") || "Learning..."}
+  - Response Style: ${fullContext.memory?.userPreferences?.detailLevel || "adaptive"}
+  
+  CONVERSATION INTELLIGENCE:
+  Recent Context (last 5 messages):
+  ${conversationHistory
+    .slice(-5)
+    .map((msg, i) => `${i + 1}. ${msg.role}: ${msg.content}`)
+    .join("\n")}
+  
+  USER INTENT ANALYSIS:
+  - Intent Type: ${userIntent.type}
+  - Confidence: ${userIntent.confidence}
+  - Suggested Actions: ${userIntent.suggestedActions.join(", ")}
+  - Context Clues: ${userIntent.contextClues.join(", ")}
+  - Requires Action: ${userIntent.requiresAction}
+  
+  CONTEXTUAL INSIGHTS:
+  ${contextualInsights.join("\n")}
+  
+  ${webSearchResults ? `EXTERNAL KNOWLEDGE: ${webSearchResults}` : ""}
+  
+  CURRENT USER MESSAGE: ${message}
+  
+  SUPERIOR AI CAPABILITIES:
+  1. Deep semantic understanding of user intent beyond literal interpretation
+  2. Contextual memory spanning entire project lifecycle with pattern recognition
+  3. Proactive problem identification and solution suggestion
+  4. Intelligent task orchestration and autonomous implementation
+  5. Real-time codebase analysis with dependency mapping
+  6. Advanced error prediction and prevention
+  7. Adaptive communication style based on user preferences
+  8. Multi-modal reasoning combining code, conversation, and external knowledge
+  9. Autonomous learning and improvement from each interaction
+  10. Strategic project guidance based on best practices and patterns
+  
+  INTELLIGENT RESPONSE FRAMEWORK:
+  1. UNDERSTAND: Analyze the user's true intent, not just surface-level words
+  2. CONTEXTUALIZE: Consider full project state, history, and patterns
+  3. ANTICIPATE: Predict follow-up needs and potential issues
+  4. RECOMMEND: Provide specific, actionable guidance based on actual project state
+  5. EXECUTE: Offer to take autonomous actions when beneficial
+  6. LEARN: Extract insights for future interactions
+  
+  RESPONSE REQUIREMENTS:
+  - Demonstrate deep understanding of the project and user's goals
+  - Provide specific, contextual advice referencing actual files and code
+  - Anticipate needs and offer proactive solutions
+  - Use appropriate technical depth based on user's demonstrated expertise
+  - Offer concrete next steps and autonomous actions
+  - Show learning from previous interactions
+  - Be conversational yet professional and highly knowledgeable
+  
+  Generate an exceptionally intelligent response that showcases deep project understanding and provides maximum value to the user.
+  `
 
     try {
       const result = await this.model.generateContent(prompt)
       const response = await result.response
       const chatResponse = response.text()
 
-      // Enhanced tool call detection and execution
-      if (chatResponse.includes("```tool_code")) {
-        const toolCallMatch = chatResponse.match(/```tool_code\n(.*?)\n```/s)
-        if (toolCallMatch) {
-          const toolCall = toolCallMatch[1]
-          const toolResult = await this.executeToolCall(toolCall, fullContext)
+      // Enhanced autonomous action detection
+      const autonomousActions = this.detectAutonomousActions(chatResponse, userIntent)
 
-          // Generate follow-up response with tool results
-          const followUpPrompt = `
-          Previous response: ${chatResponse}
-          Tool execution result: ${toolResult}
-          
-          Continue the conversation naturally, incorporating the tool results and proceeding with the next logical step.
-          Be specific about what was found and what actions should be taken next.
-          `
-
-          const followUpResult = await this.model.generateContent(followUpPrompt)
-          const followUpResponse = await followUpResult.response
-          return chatResponse + "\n\n" + followUpResponse.text()
+      if (autonomousActions.length > 0) {
+        // Execute autonomous actions
+        for (const action of autonomousActions) {
+          await this.executeAutonomousAction(action, fullContext)
         }
       }
 
-      // Update conversation history in agent memory with enhanced context
+      // Update conversation history with enhanced context
       if (this.githubStorage) {
         try {
           const currentMemory = await this.githubStorage.getAgentMemory()
@@ -1104,6 +1096,13 @@ Last Modified: ${fileInfo.lastModified}`
               content: message,
               timestamp: new Date().toISOString(),
               intent: userIntent,
+              context: {
+                projectState: {
+                  progress: projectContext.progress,
+                  taskCount: fullContext.tasks?.length || 0,
+                  fileCount: Object.keys(fullContext.codebaseIndex?.files || {}).length,
+                },
+              },
             },
             {
               role: "agent",
@@ -1114,9 +1113,11 @@ Last Modified: ${fileInfo.lastModified}`
                 codebaseReferenced:
                   chatResponse.includes("src/") || chatResponse.includes(".ts") || chatResponse.includes(".tsx"),
                 actionsOffered: this.extractOfferedActions(chatResponse),
+                autonomousActions: autonomousActions.map((a) => a.type),
+                insights: contextualInsights,
               },
             },
-          ].slice(-50) // Keep last 50 messages
+          ].slice(-50)
 
           const updatedMemory = {
             ...currentMemory,
@@ -1129,12 +1130,21 @@ Last Modified: ${fileInfo.lastModified}`
               ...currentMemory?.userPreferences,
               preferredResponseStyle: this.analyzeResponsePreferences(conversationHistory),
               commonRequests: this.analyzeCommonRequests(conversationHistory),
+              technicalLevel: this.assessTechnicalLevel(conversationHistory),
+              interactionPatterns: this.analyzeInteractionPatterns(conversationHistory),
+            },
+            projectInsights: {
+              ...currentMemory?.projectInsights,
+              lastAnalysis: new Date().toISOString(),
+              keyPatterns: this.extractProjectPatterns(fullContext),
+              improvementAreas: this.identifyImprovementAreas(fullContext),
+              nextSteps: this.suggestNextSteps(fullContext, userIntent),
             },
           }
 
           await this.githubStorage.saveAgentMemory(updatedMemory)
         } catch (error) {
-          console.error("Error updating conversation history:", error)
+          console.error("Error updating enhanced conversation history:", error)
         }
       }
 
@@ -1150,133 +1160,190 @@ Last Modified: ${fileInfo.lastModified}`
     }
   }
 
-  private analyzeUserIntent(message: string, conversationHistory: any[]): any {
-    const lowerMessage = message.toLowerCase()
+  private generateContextualInsights(fullContext: any, userIntent: any): string[] {
+    const insights: string[] = []
 
-    // Intent classification
-    let intentType = "general"
-    let confidence = 0.5
-    const suggestedActions: string[] = []
-    const contextClues: string[] = []
+    // Project health insights
+    const completedTasks = fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0
+    const totalTasks = fullContext.tasks?.length || 0
+    const completionRate = totalTasks > 0 ? ((completedTasks / totalTasks) * 100).toFixed(1) : "0"
 
-    // Task-related intents
-    if (lowerMessage.includes("create") && lowerMessage.includes("task")) {
-      intentType = "task_creation"
-      confidence = 0.9
-      suggestedActions.push("create_task", "implement_task")
-      contextClues.push("task_creation_request")
+    insights.push(`📊 Project Health: ${completionRate}% task completion rate`)
+
+    // Code quality insights
+    const tsFiles = Object.values(fullContext.codebaseIndex?.files || {}).filter(
+      (f: any) => f.language === "typescript",
+    ).length
+    const totalFiles = Object.keys(fullContext.codebaseIndex?.files || {}).length
+
+    if (totalFiles > 0) {
+      insights.push(
+        `🔧 Codebase: ${tsFiles}/${totalFiles} TypeScript files (${((tsFiles / totalFiles) * 100).toFixed(1)}% typed)`,
+      )
     }
 
-    if (lowerMessage.includes("implement") || lowerMessage.includes("build") || lowerMessage.includes("develop")) {
-      intentType = "implementation"
-      confidence = 0.8
-      suggestedActions.push("implement_code", "analyze_requirements")
-      contextClues.push("implementation_request")
+    // Recent activity insights
+    const recentLearnings = Object.keys(fullContext.memory?.learnings || {}).slice(-3)
+    if (recentLearnings.length > 0) {
+      insights.push(`🎯 Recent Focus: ${recentLearnings.join(", ")}`)
     }
 
-    // Information seeking intents
-    if (lowerMessage.includes("how") || lowerMessage.includes("what") || lowerMessage.includes("explain")) {
-      intentType = "information_seeking"
-      confidence = 0.7
-      suggestedActions.push("web_search", "analyze_codebase")
-      contextClues.push("information_request")
+    // Intent-based insights
+    if (userIntent.type === "implementation" && totalTasks > 0) {
+      const pendingTasks = fullContext.tasks?.filter((t: any) => t.status === "pending").length || 0
+      insights.push(`⚡ Ready for Implementation: ${pendingTasks} pending tasks available`)
     }
 
-    // Problem-solving intents
-    if (
-      lowerMessage.includes("error") ||
-      lowerMessage.includes("bug") ||
-      lowerMessage.includes("fix") ||
-      lowerMessage.includes("problem")
-    ) {
-      intentType = "problem_solving"
-      confidence = 0.8
-      suggestedActions.push("analyze_error", "suggest_fix", "implement_fix")
-      contextClues.push("problem_report")
-    }
-
-    // Deployment intents
-    if (lowerMessage.includes("deploy") || lowerMessage.includes("deployment")) {
-      intentType = "deployment"
-      confidence = 0.9
-      suggestedActions.push("check_deployment_status", "deploy_project", "fix_deployment")
-      contextClues.push("deployment_request")
-    }
-
-    // API-related intents
-    if (lowerMessage.includes("api") || lowerMessage.includes("aladhan") || lowerMessage.includes("islamicfinder")) {
-      intentType = "api_integration"
-      confidence = 0.8
-      suggestedActions.push("update_api_integration", "test_api", "implement_api_changes")
-      contextClues.push("api_modification_request")
-    }
-
-    return {
-      type: intentType,
-      confidence,
-      suggestedActions,
-      contextClues,
-      needsWebSearch:
-        intentType === "information_seeking" || lowerMessage.includes("search") || lowerMessage.includes("look up"),
-    }
+    return insights
   }
 
-  private extractOfferedActions(response: string): string[] {
-    const actions: string[] = []
+  private detectAutonomousActions(response: string, userIntent: any): Array<{ type: string; data: any }> {
+    const actions: Array<{ type: string; data: any }> = []
 
-    if (response.includes("I'll") || response.includes("I can")) {
-      if (response.includes("implement")) actions.push("implementation")
-      if (response.includes("create")) actions.push("creation")
-      if (response.includes("fix")) actions.push("fixing")
-      if (response.includes("deploy")) actions.push("deployment")
-      if (response.includes("search")) actions.push("search")
-      if (response.includes("analyze")) actions.push("analysis")
+    // Detect if agent should create tasks
+    if (response.includes("I'll create") && response.includes("task")) {
+      actions.push({
+        type: "create_task",
+        data: { fromResponse: true },
+      })
+    }
+
+    // Detect if agent should analyze code
+    if (response.includes("Let me analyze") || response.includes("I'll examine")) {
+      actions.push({
+        type: "analyze_codebase",
+        data: { trigger: "autonomous" },
+      })
+    }
+
+    // Detect if agent should implement something
+    if (response.includes("I'll implement") || response.includes("Let me implement")) {
+      actions.push({
+        type: "implement_feature",
+        data: { autonomous: true },
+      })
     }
 
     return actions
   }
 
-  private analyzeResponsePreferences(conversationHistory: any[]): any {
-    // Analyze user's preferred response style based on conversation history
-    const preferences = {
-      detailLevel: "medium", // low, medium, high
-      technicalDepth: "medium", // low, medium, high
-      actionOriented: true,
-      prefersExamples: false,
-    }
-
-    // Simple analysis based on conversation patterns
-    const userMessages = conversationHistory.filter((msg) => msg.role === "user")
-
-    if (userMessages.length > 0) {
-      const avgMessageLength = userMessages.reduce((sum, msg) => sum + msg.content.length, 0) / userMessages.length
-
-      if (avgMessageLength > 100) {
-        preferences.detailLevel = "high"
-        preferences.technicalDepth = "high"
-      } else if (avgMessageLength < 30) {
-        preferences.detailLevel = "low"
-        preferences.actionOriented = true
+  private async executeAutonomousAction(action: { type: string; data: any }, context: any): Promise<void> {
+    try {
+      switch (action.type) {
+        case "analyze_codebase":
+          // Perform deep codebase analysis
+          await this.performCodebaseAnalysis(context)
+          break
+        case "create_task":
+          // Create intelligent tasks based on context
+          await this.createIntelligentTasks(context)
+          break
+        case "implement_feature":
+          // Implement features autonomously
+          await this.autonomousImplementation(context)
+          break
       }
+    } catch (error) {
+      console.error(`Error executing autonomous action ${action.type}:`, error)
     }
-
-    return preferences
   }
 
-  private analyzeCommonRequests(conversationHistory: any[]): string[] {
-    const requests: string[] = []
+  private assessTechnicalLevel(conversationHistory: any[]): string {
     const userMessages = conversationHistory.filter((msg) => msg.role === "user")
+    let technicalScore = 0
 
     userMessages.forEach((msg) => {
       const content = msg.content.toLowerCase()
-      if (content.includes("implement")) requests.push("implementation")
-      if (content.includes("create")) requests.push("creation")
-      if (content.includes("fix")) requests.push("fixing")
-      if (content.includes("deploy")) requests.push("deployment")
-      if (content.includes("explain")) requests.push("explanation")
+
+      // Technical indicators
+      if (content.includes("typescript") || content.includes("javascript")) technicalScore += 2
+      if (content.includes("api") || content.includes("endpoint")) technicalScore += 2
+      if (content.includes("component") || content.includes("hook")) technicalScore += 2
+      if (content.includes("deploy") || content.includes("build")) technicalScore += 1
+      if (content.includes("error") || content.includes("debug")) technicalScore += 1
+
+      // Advanced technical indicators
+      if (content.includes("async") || content.includes("promise")) technicalScore += 3
+      if (content.includes("interface") || content.includes("type")) technicalScore += 3
+      if (content.includes("webpack") || content.includes("vite")) technicalScore += 4
     })
 
-    // Return unique requests
-    return [...new Set(requests)]
+    const avgScore = userMessages.length > 0 ? technicalScore / userMessages.length : 0
+
+    if (avgScore >= 3) return "expert"
+    if (avgScore >= 1.5) return "intermediate"
+    return "beginner"
+  }
+
+  private analyzeInteractionPatterns(conversationHistory: any[]): any {
+    const patterns = {
+      preferredActions: [] as string[],
+      communicationStyle: "direct",
+      sessionLength: "medium",
+      topicFocus: [] as string[],
+    }
+
+    const userMessages = conversationHistory.filter((msg) => msg.role === "user")
+
+    // Analyze preferred actions
+    userMessages.forEach((msg) => {
+      const content = msg.content.toLowerCase()
+      if (content.includes("implement")) patterns.preferredActions.push("implementation")
+      if (content.includes("create")) patterns.preferredActions.push("creation")
+      if (content.includes("fix")) patterns.preferredActions.push("fixing")
+      if (content.includes("explain")) patterns.preferredActions.push("explanation")
+    })
+
+    // Analyze communication style
+    const avgMessageLength = userMessages.reduce((sum, msg) => sum + msg.content.length, 0) / userMessages.length
+    if (avgMessageLength > 100) patterns.communicationStyle = "detailed"
+    else if (avgMessageLength < 30) patterns.communicationStyle = "concise"
+
+    return patterns
+  }
+
+  private extractProjectPatterns(fullContext: any): any {
+    return {
+      architectureStyle: this.detectArchitectureStyle(fullContext),
+      commonPatterns: this.identifyCommonPatterns(fullContext),
+      codeQuality: this.assessCodeQuality(fullContext),
+    }
+  }
+
+  private identifyImprovementAreas(fullContext: any): string[] {
+    const areas: string[] = []
+
+    const failedTasks = fullContext.tasks?.filter((t: any) => t.status === "failed").length || 0
+    if (failedTasks > 0) {
+      areas.push(`${failedTasks} failed tasks need attention`)
+    }
+
+    const tsFiles = Object.values(fullContext.codebaseIndex?.files || {}).filter(
+      (f: any) => f.language === "typescript",
+    ).length
+    const jsFiles = Object.values(fullContext.codebaseIndex?.files || {}).filter(
+      (f: any) => f.language === "javascript",
+    ).length
+
+    if (jsFiles > tsFiles) {
+      areas.push("Consider migrating JavaScript files to TypeScript")
+    }
+
+    return areas
+  }
+
+  private suggestNextSteps(fullContext: any, userIntent: any): string[] {
+    const steps: string[] = []
+
+    const pendingTasks = fullContext.tasks?.filter((t: any) => t.status === "pending").length || 0
+    if (pendingTasks > 0) {
+      steps.push(`Implement ${pendingTasks} pending tasks`)
+    }
+
+    if (userIntent.type === "implementation") {
+      steps.push("Focus on core functionality implementation")
+    }
+
+    return steps
   }
 }

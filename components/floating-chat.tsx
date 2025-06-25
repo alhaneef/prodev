@@ -160,27 +160,44 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   const handleRealTaskImplementation = async (message: string): Promise<string> => {
     const lowerMessage = message.toLowerCase()
 
-    // Check for task creation requests
-    if (lowerMessage.includes("create") && lowerMessage.includes("task") && lowerMessage.includes("aladhan")) {
-      const taskTitle = "Update app to use Aladhan.com API instead of IslamicFinder"
-      const taskDescription =
-        "Replace the current IslamicFinder API integration with Aladhan.com API for fetching prayer times. Update all necessary components including prayerTimeService.ts, usePrayerTimes hook, and related UI components to work with the new API structure and response format."
+    // Enhanced intent analysis for task creation
+    if (
+      (lowerMessage.includes("create") || lowerMessage.includes("add")) &&
+      lowerMessage.includes("task") &&
+      !lowerMessage.includes("implement all") &&
+      !lowerMessage.includes("implement the tasks")
+    ) {
+      // This is a task creation request, not implementation
+      setAgentStatus("thinking")
 
-      const createResult = await handleCreateTaskFromChat(taskTitle, taskDescription)
-
-      // Now implement the task
       try {
-        const tasksResponse = await fetch(`/api/tasks?projectId=${projectId}`, {
+        // Extract task details from the message
+        const taskTitle = extractTaskTitle(message)
+        const taskDescription = extractTaskDescription(message)
+
+        const response = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           credentials: "include",
+          body: JSON.stringify({
+            projectId,
+            action: "create",
+            taskData: {
+              title: taskTitle,
+              description: taskDescription,
+              priority: "medium",
+              estimatedTime: "2 hours",
+            },
+          }),
         })
 
-        if (tasksResponse.ok) {
-          const tasksData = await tasksResponse.json()
-          const newTask = tasksData.tasks?.find((t: any) => t.title.includes("Aladhan"))
+        const data = await response.json()
+        if (data.success) {
+          onUpdate?.("task_created", "task_created")
 
-          if (newTask) {
-            setAgentStatus("working")
-
+          // Check if user also wants to implement immediately
+          if (lowerMessage.includes("implement") || lowerMessage.includes("then implement")) {
+            // Implement the newly created task
             const implementResponse = await fetch("/api/tasks", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -188,25 +205,28 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
               body: JSON.stringify({
                 projectId,
                 action: "implement",
-                taskId: newTask.id,
+                taskId: data.task.id,
               }),
             })
 
             const implementData = await implementResponse.json()
-
             if (implementData.success) {
-              return `${createResult}\n\n✅ Successfully implemented the Aladhan API update!\n\n📁 Files modified: ${implementData.filesModified}\n💬 ${implementData.implementation?.message || "Implementation completed"}`
+              return `✅ Created and implemented task: "${taskTitle}"\n\n📁 Files modified: ${implementData.filesModified}\n💬 ${implementData.implementation?.message || "Implementation completed"}`
             } else {
-              return `${createResult}\n\n❌ Failed to implement: ${implementData.error}`
+              return `✅ Created task: "${taskTitle}"\n❌ Implementation failed: ${implementData.error}`
             }
           }
+
+          return `✅ Created task: "${taskTitle}"\n\nTask has been added to your project. Would you like me to implement it now?`
+        } else {
+          return `❌ Failed to create task: ${data.error}`
         }
       } catch (error) {
-        return `${createResult}\n\n❌ Implementation error: ${error instanceof Error ? error.message : "Unknown error"}`
+        return `❌ Error creating task: ${error instanceof Error ? error.message : "Unknown error"}`
       }
     }
 
-    // Rest of the existing implementation logic...
+    // Rest of the existing implementation logic for other actions...
     if (lowerMessage.includes("implement all") || lowerMessage.includes("implement the tasks")) {
       setAgentStatus("working")
 
@@ -262,7 +282,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
       }
     }
 
-    if (lowerMessage.includes("implement") && lowerMessage.includes("task")) {
+    if (lowerMessage.includes("implement") && lowerMessage.includes("task") && !lowerMessage.includes("create")) {
       try {
         console.log("🤖 Getting tasks for single implementation...")
 
@@ -314,6 +334,37 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
 
     return ""
+  }
+
+  // Helper functions for better intent understanding
+  const extractTaskTitle = (message: string): string => {
+    // Try to extract task title from various patterns
+    const patterns = [
+      /(?:create|add).*?task.*?(?:on|for|about)\s+(.+?)(?:\.|,|$)/i,
+      /(?:create|add).*?task.*?["'](.+?)["']/i,
+      /(?:create|add).*?task.*?:\s*(.+?)(?:\.|,|$)/i,
+      /(?:create|add).*?task\s+(.+?)(?:\s+and\s+implement|\s+then\s+implement|$)/i,
+    ]
+
+    for (const pattern of patterns) {
+      const match = message.match(pattern)
+      if (match && match[1]) {
+        return match[1].trim()
+      }
+    }
+
+    // Fallback: extract from context
+    return "New Task from Chat"
+  }
+
+  const extractTaskDescription = (message: string): string => {
+    // Extract more detailed description from the message
+    const cleanMessage = message
+      .replace(/(?:create|add).*?task/i, "")
+      .replace(/(?:and\s+)?(?:then\s+)?implement/i, "")
+      .trim()
+
+    return cleanMessage || "Task created from chat conversation"
   }
 
   const handleAutonomousFollowUp = async (agentResponse: string, currentMessages: Message[]) => {
