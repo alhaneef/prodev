@@ -163,6 +163,8 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
 
   const handleImplementTask = async (taskId: string) => {
     setImplementing(taskId)
+    console.log(`🔨 Starting implementation of task: ${taskId}`)
+
     try {
       const response = await fetch("/api/tasks", {
         method: "POST",
@@ -175,27 +177,29 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
         }),
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        if (data.success) {
-          // Update task status in local state
-          setTasks((prev) =>
-            prev.map((task) =>
-              task.id === taskId ? { ...task, status: "completed", updatedAt: new Date().toISOString() } : task,
-            ),
-          )
-          onTaskUpdate?.(taskId, "implemented")
-        } else {
-          // Mark as failed
-          setTasks((prev) =>
-            prev.map((task) =>
-              task.id === taskId ? { ...task, status: "failed", updatedAt: new Date().toISOString() } : task,
-            ),
-          )
-        }
+      const data = await response.json()
+      console.log("📊 Task implementation response:", data)
+
+      if (data.success) {
+        // Update task status in local state
+        setTasks((prev) =>
+          prev.map((task) =>
+            task.id === taskId ? { ...task, status: "completed", updatedAt: new Date().toISOString() } : task,
+          ),
+        )
+        onTaskUpdate?.(taskId, "implemented")
+        console.log(`✅ Task ${taskId} implemented successfully`)
+      } else {
+        console.error(`❌ Task ${taskId} implementation failed:`, data.error)
+        // Mark as failed
+        setTasks((prev) =>
+          prev.map((task) =>
+            task.id === taskId ? { ...task, status: "failed", updatedAt: new Date().toISOString() } : task,
+          ),
+        )
       }
     } catch (error) {
-      console.error("Error implementing task:", error)
+      console.error(`❌ Error implementing task ${taskId}:`, error)
       // Mark as failed
       setTasks((prev) =>
         prev.map((task) =>
@@ -209,6 +213,8 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
 
   const handleImplementAll = async () => {
     setImplementingAll(true)
+    console.log("🤖 Starting implementation of all pending tasks...")
+
     try {
       const response = await fetch("/api/tasks", {
         method: "POST",
@@ -220,28 +226,31 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
         }),
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        if (data.success) {
-          // Update task statuses based on results
-          setTasks((prev) =>
-            prev.map((task) => {
-              const result = data.results.find((r: any) => r.taskId === task.id)
-              if (result) {
-                return {
-                  ...task,
-                  status: result.status,
-                  updatedAt: new Date().toISOString(),
-                }
+      const data = await response.json()
+      console.log("📊 Implement all response:", data)
+
+      if (data.success) {
+        // Update task statuses based on results
+        setTasks((prev) =>
+          prev.map((task) => {
+            const result = data.results.find((r: any) => r.taskId === task.id)
+            if (result) {
+              return {
+                ...task,
+                status: result.status,
+                updatedAt: new Date().toISOString(),
               }
-              return task
-            }),
-          )
-          onTaskUpdate?.("all", "implemented")
-        }
+            }
+            return task
+          }),
+        )
+        onTaskUpdate?.("all", "implemented")
+        console.log(`✅ Implemented all tasks: ${data.results.length} processed`)
+      } else {
+        console.error("❌ Implement all failed:", data.error)
       }
     } catch (error) {
-      console.error("Error implementing all tasks:", error)
+      console.error("❌ Error implementing all tasks:", error)
     } finally {
       setImplementingAll(false)
     }

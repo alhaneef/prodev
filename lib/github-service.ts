@@ -63,6 +63,40 @@ export class GitHubService {
     throw new Error("File not found")
   }
 
+  async createFile(owner: string, repo: string, path: string, content: string, message: string) {
+    const { data } = await this.octokit.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path,
+      message,
+      content: Buffer.from(content).toString("base64"),
+    })
+    return data
+  }
+
+  async updateFile(owner: string, repo: string, path: string, content: string, message: string, sha: string) {
+    const { data } = await this.octokit.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path,
+      message,
+      content: Buffer.from(content).toString("base64"),
+      sha,
+    })
+    return data
+  }
+
+  async deleteFile(owner: string, repo: string, path: string, message: string, sha: string) {
+    const { data } = await this.octokit.repos.deleteFile({
+      owner,
+      repo,
+      path,
+      message,
+      sha,
+    })
+    return data
+  }
+
   async listFiles(owner: string, repo: string, path = "") {
     const { data } = await this.octokit.repos.getContent({ owner, repo, path })
     return Array.isArray(data) ? data : [data]

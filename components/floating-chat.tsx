@@ -125,16 +125,9 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     if (lowerMessage.includes("implement all") || lowerMessage.includes("implement the tasks")) {
       setAgentStatus("working")
 
-      const implementingMessage: Message = {
-        id: `msg_${Date.now()}_implementing`,
-        role: "agent",
-        content: "🔨 Starting implementation of all pending tasks... This may take a few minutes.",
-        timestamp: new Date().toISOString(),
-        type: "file_operation",
-      }
-      setMessages((prev) => [...prev, implementingMessage])
-
       try {
+        console.log("🤖 Starting implementation of all tasks...")
+
         const response = await fetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -146,6 +139,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
         })
 
         const data = await response.json()
+        console.log("📊 Implementation response:", data)
 
         if (data.success) {
           const completedCount = data.results.filter((r: any) => r.status === "completed").length
@@ -158,7 +152,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
             data.results
               .filter((r: any) => r.status === "completed")
               .forEach((r: any) => {
-                resultMessage += `- ${r.title} (${r.files} files modified)\n`
+                resultMessage += `- ${r.title} (${r.files || 0} files modified)\n`
               })
           }
 
@@ -174,16 +168,19 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
           onUpdate?.("tasks_implemented", "implementation_completed")
           return resultMessage
         } else {
-          return `❌ Implementation failed: ${data.error}`
+          console.error("❌ Implementation API error:", data.error)
+          return `❌ Implementation failed: ${data.error}\n\nDetails: ${data.details || "No additional details"}`
         }
       } catch (error) {
+        console.error("❌ Implementation request error:", error)
         return `❌ Implementation error: ${error instanceof Error ? error.message : "Unknown error"}`
       }
     }
 
     if (lowerMessage.includes("implement") && lowerMessage.includes("task")) {
-      // Try to extract task ID or implement first pending task
       try {
+        console.log("🤖 Getting tasks for single implementation...")
+
         const tasksResponse = await fetch(`/api/tasks?projectId=${projectId}`, {
           credentials: "include",
         })
@@ -194,17 +191,9 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
           if (pendingTasks.length > 0) {
             const taskToImplement = pendingTasks[0]
-
             setAgentStatus("working")
 
-            const implementingMessage: Message = {
-              id: `msg_${Date.now()}_implementing_single`,
-              role: "agent",
-              content: `🔨 Implementing task: "${taskToImplement.title}"...`,
-              timestamp: new Date().toISOString(),
-              type: "file_operation",
-            }
-            setMessages((prev) => [...prev, implementingMessage])
+            console.log(`🔨 Implementing single task: ${taskToImplement.title}`)
 
             const response = await fetch("/api/tasks", {
               method: "POST",
@@ -218,18 +207,23 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
             })
 
             const data = await response.json()
+            console.log("📊 Single task response:", data)
 
             if (data.success) {
               onUpdate?.("task_implemented", "task_implemented")
               return `✅ Successfully implemented task: "${taskToImplement.title}"\n\n📁 Files modified: ${data.filesModified}\n💬 ${data.implementation?.message || "Implementation completed"}`
             } else {
-              return `❌ Failed to implement task: ${data.error}`
+              console.error("❌ Single task error:", data.error)
+              return `❌ Failed to implement task: ${data.error}\n\nDetails: ${data.details || "No additional details"}`
             }
           } else {
             return "ℹ️ No pending tasks found to implement."
           }
+        } else {
+          return "❌ Failed to fetch tasks for implementation."
         }
       } catch (error) {
+        console.error("❌ Single task implementation error:", error)
         return `❌ Error implementing task: ${error instanceof Error ? error.message : "Unknown error"}`
       }
     }

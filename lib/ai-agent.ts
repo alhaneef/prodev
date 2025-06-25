@@ -341,12 +341,67 @@ export class AIAgent {
         timestamp: new Date().toISOString(),
       })
 
-      // Commit the changes to GitHub
-      const commitSuccess = await this.commitChanges(implementation.files, implementation.commitMessage)
-
-      if (!commitSuccess) {
-        throw new Error("Failed to commit changes to GitHub")
+      // Apply the implementation to GitHub immediately
+      for (const file of implementation.files) {
+        try {
+          if (file.operation === "create" || file.operation === "update") {
+            // Try to get existing file first
+            try {
+              const existingFile = await this.github.getFileContent(
+                projectContext.repository.split("/").slice(-2)[0],
+                projectContext.repository.split("/").slice(-2)[1],
+                file.path,
+              )
+              // File exists, update it
+              await this.github.updateFile(
+                projectContext.repository.split("/").slice(-2)[0],
+                projectContext.repository.split("/").slice(-2)[1],
+                file.path,
+                file.content,
+                implementation.commitMessage,
+                existingFile.sha,
+              )
+            } catch (error) {
+              // File doesn't exist, create it
+              await this.github.createFile(
+                projectContext.repository.split("/").slice(-2)[0],
+                projectContext.repository.split("/").slice(-2)[1],
+                file.path,
+                file.content,
+                implementation.commitMessage,
+              )
+            }
+          } else if (file.operation === "delete") {
+            try {
+              const existingFile = await this.github.getFileContent(
+                projectContext.repository.split("/").slice(-2)[0],
+                projectContext.repository.split("/").slice(-2)[1],
+                file.path,
+              )
+              await this.github.deleteFile(
+                projectContext.repository.split("/").slice(-2)[0],
+                projectContext.repository.split("/").slice(-2)[1],
+                file.path,
+                implementation.commitMessage,
+                existingFile.sha,
+              )
+            } catch (error) {
+              console.log(`File ${file.path} doesn't exist, skipping delete`)
+            }
+          }
+        } catch (fileError) {
+          console.error(`Error processing file ${file.path}:`, fileError)
+          throw new Error(
+            `Failed to process file ${file.path}: ${fileError instanceof Error ? fileError.message : "Unknown error"}`,
+          )
+        }
       }
+
+      this.sendFeedback({
+        type: "completion",
+        message: `Successfully committed ${implementation.files.length} files to GitHub`,
+        timestamp: new Date().toISOString(),
+      })
 
       // Update agent memory with new learnings
       if (this.githubStorage) {

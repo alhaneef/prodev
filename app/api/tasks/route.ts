@@ -213,6 +213,7 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({
               success: false,
               error: `Implementation failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+              details: error instanceof Error ? error.stack : undefined,
             })
           }
 
