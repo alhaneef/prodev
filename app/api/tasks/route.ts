@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
     console.error("Tasks GET API error:", error)
     return NextResponse.json({
       success: false,
-      error: error instanceof Error ? error.message : "Failed to get tasks",
+      error: error instanceof Error ? error.message : "Failed to load tasks",
     })
   }
 }
@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const { projectId, action, taskId, taskData, parentTaskId, files } = await request.json()
+    const { projectId, action, taskData, taskId, files, parentTaskId } = await request.json()
 
     if (!projectId) {
       return NextResponse.json({ success: false, error: "Project ID required" })
@@ -90,98 +90,71 @@ export async function POST(request: NextRequest) {
     try {
       switch (action) {
         case "create":
-          if (!taskData?.title || !taskData?.description) {
-            return NextResponse.json({ success: false, error: "Title and description required" })
+          if (!taskData?.title) {
+            return NextResponse.json({ success: false, error: "Task title required" })
           }
 
           const newTask = {
             id: `task_${Date.now()}`,
             title: taskData.title,
-            description: taskData.description,
-            status: "pending",
+            description: taskData.description || "",
+            status: "pending" as const,
             priority: taskData.priority || "medium",
-            type: "manual",
+            type: "manual" as const,
             estimatedTime: taskData.estimatedTime || "2 hours",
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             files: taskData.files || [],
             dependencies: taskData.dependencies || [],
-            subtasks: [],
+            parentTaskId: parentTaskId || undefined,
           }
 
           await githubStorage.createTask(newTask)
           return NextResponse.json({ success: true, task: newTask })
 
-        case "update":
-          if (!taskId || !taskData?.title || !taskData?.description) {
-            return NextResponse.json({ success: false, error: "Task ID, title, and description required" })
-          }
-
-          await githubStorage.updateTask(taskId, {
-            title: taskData.title,
-            description: taskData.description,
-            priority: taskData.priority,
-            estimatedTime: taskData.estimatedTime,
-            updatedAt: new Date().toISOString(),
-          })
-
-          return NextResponse.json({ success: true, message: "Task updated successfully" })
-
-        case "update_files":
-          if (!taskId) {
-            return NextResponse.json({ success: false, error: "Task ID required" })
-          }
-
-          await githubStorage.updateTask(taskId, {
-            files: files || [],
-            updatedAt: new Date().toISOString(),
-          })
-
-          return NextResponse.json({ success: true, message: "Task files updated successfully" })
-
-        case "delete":
-          if (!taskId) {
-            return NextResponse.json({ success: false, error: "Task ID required" })
-          }
-
-          await githubStorage.deleteTask(taskId)
-          return NextResponse.json({ success: true, message: "Task deleted successfully" })
-
         case "create_subtask":
           if (!parentTaskId || !taskData?.title) {
-            return NextResponse.json({ success: false, error: "Parent task ID and title required" })
+            return NextResponse.json({ success: false, error: "Parent task ID and subtask title required" })
           }
 
           const subtask = {
-            id: `task_${Date.now()}`,
+            id: `subtask_${Date.now()}`,
             title: taskData.title,
-            description: taskData.description || `Subtask of parent task`,
-            status: "pending",
+            description: taskData.description || "",
+            status: "pending" as const,
             priority: taskData.priority || "medium",
-            type: "manual",
+            type: "manual" as const,
             estimatedTime: taskData.estimatedTime || "1 hour",
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-            parentTaskId,
             files: taskData.files || [],
             dependencies: taskData.dependencies || [],
+            parentTaskId,
           }
 
-          // Get current tasks and add subtask to parent
-          const tasks = await githubStorage.getTasks()
-          const updatedTasks = tasks.map((task) => {
-            if (task.id === parentTaskId) {
-              return {
-                ...task,
-                subtasks: [...(task.subtasks || []), subtask],
-                updatedAt: new Date().toISOString(),
-              }
-            }
-            return task
-          })
+          await githubStorage.createTask(subtask)
+          return NextResponse.json({ success: true, task: subtask })
 
-          await githubStorage.saveTasks(updatedTasks)
-          return NextResponse.json({ success: true, subtask })
+        case "update_files":
+          if (!taskId || !files) {
+            return NextResponse.json({ success: false, error: "Task ID and files required" })
+          }
+
+          const tasks = await githubStorage.getTasks()
+          const taskToUpdate = tasks.find((t) => t.id === taskId)
+
+          if (!taskToUpdate) {
+            return NextResponse.json({ success: false, error: "Task not found" })
+          }
+
+          const updatedTask = {
+            ...taskToUpdate,
+            files,
+            updatedAt: new Date().toISOString(),
+          }
+
+          await githubStorage.updateTask(taskId, updatedTask)
+          return NextResponse.json({ success: true, task: updatedTask })
 
         case "implement":
           if (!taskId) {
@@ -189,14 +162,18 @@ export async function POST(request: NextRequest) {
           }
 
           if (!credentials.gemini_api_key) {
-            return NextResponse.json({ success: false, error: "Gemini API key required" })
+            return NextResponse.json({ success: false, error: "Gemini API key required for implementation" })
           }
 
           const allTasks = await githubStorage.getTasks()
-          const task = allTasks.find((t) => t.id === taskId)
+          const taskToImplement = allTasks.find((t) => t.id === taskId)
 
-          if (!task) {
+          if (!taskToImplement) {
             return NextResponse.json({ success: false, error: "Task not found" })
+          }
+
+          if (taskToImplement.status === "completed") {
+            return NextResponse.json({ success: false, error: "Task already completed" })
           }
 
           // Mark task as in-progress
@@ -204,70 +181,92 @@ export async function POST(request: NextRequest) {
 
           try {
             const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
-            const implementation = await aiAgent.implementTask(task, project)
 
-            // Apply the implementation to GitHub
-            for (const file of implementation.files) {
-              if (file.operation === "create" || file.operation === "update") {
-                await githubStorage.updateFileContent(file.path, file.content, implementation.commitMessage)
-              }
-            }
+            console.log(`🤖 Starting implementation of task: ${taskToImplement.title}`)
+
+            const implementation = await aiAgent.implementTask(taskToImplement, project)
+
+            console.log(`✅ Implementation completed for task: ${taskToImplement.title}`)
+            console.log(`📁 Files modified: ${implementation.files.length}`)
 
             // Mark task as completed
-            await githubStorage.updateTask(taskId, { status: "completed" })
+            await githubStorage.updateTask(taskId, {
+              status: "completed",
+              updatedAt: new Date().toISOString(),
+            })
 
             return NextResponse.json({
               success: true,
               implementation,
-              message: "Task implemented successfully",
+              message: `Task "${taskToImplement.title}" implemented successfully`,
+              filesModified: implementation.files.length,
             })
           } catch (error) {
+            console.error(`❌ Implementation failed for task: ${taskToImplement.title}`, error)
+
             // Mark task as failed
-            await githubStorage.updateTask(taskId, { status: "failed" })
+            await githubStorage.updateTask(taskId, {
+              status: "failed",
+              updatedAt: new Date().toISOString(),
+            })
+
             return NextResponse.json({
               success: false,
-              error: error instanceof Error ? error.message : "Implementation failed",
+              error: `Implementation failed: ${error instanceof Error ? error.message : "Unknown error"}`,
             })
           }
 
         case "implement_all":
           if (!credentials.gemini_api_key) {
-            return NextResponse.json({ success: false, error: "Gemini API key required" })
+            return NextResponse.json({ success: false, error: "Gemini API key required for implementation" })
           }
 
-          const allTasksForImplementAll = await githubStorage.getTasks()
-          const pendingTasks = allTasksForImplementAll.filter((t) => t.status === "pending")
-          const results = []
+          const allTasksList = await githubStorage.getTasks()
+          const pendingTasks = allTasksList.filter((t) => t.status === "pending")
+
+          if (pendingTasks.length === 0) {
+            return NextResponse.json({ success: true, results: [], message: "No pending tasks to implement" })
+          }
+
+          console.log(`🤖 Starting implementation of ${pendingTasks.length} pending tasks`)
 
           const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
+          const results = []
 
-          for (const task of pendingTasks.slice(0, 5)) {
-            // Limit to 5 tasks at once
+          // Implement tasks one by one to avoid overwhelming the system
+          for (const task of pendingTasks.slice(0, 3)) {
+            // Limit to 3 tasks at once
             try {
-              // Mark task as in-progress
+              console.log(`🔨 Implementing task: ${task.title}`)
+
+              // Mark as in-progress
               await githubStorage.updateTask(task.id, { status: "in-progress" })
 
               const implementation = await aiAgent.implementTask(task, project)
 
-              // Apply the implementation to GitHub
-              for (const file of implementation.files) {
-                if (file.operation === "create" || file.operation === "update") {
-                  await githubStorage.updateFileContent(file.path, file.content, implementation.commitMessage)
-                }
-              }
-
-              // Mark task as completed
-              await githubStorage.updateTask(task.id, { status: "completed" })
+              // Mark as completed
+              await githubStorage.updateTask(task.id, {
+                status: "completed",
+                updatedAt: new Date().toISOString(),
+              })
 
               results.push({
                 taskId: task.id,
                 title: task.title,
                 status: "completed",
                 files: implementation.files.length,
+                message: implementation.message,
               })
+
+              console.log(`✅ Completed task: ${task.title}`)
             } catch (error) {
-              // Mark task as failed
-              await githubStorage.updateTask(task.id, { status: "failed" })
+              console.error(`❌ Failed to implement task: ${task.title}`, error)
+
+              // Mark as failed
+              await githubStorage.updateTask(task.id, {
+                status: "failed",
+                updatedAt: new Date().toISOString(),
+              })
 
               results.push({
                 taskId: task.id,
@@ -278,36 +277,59 @@ export async function POST(request: NextRequest) {
             }
           }
 
+          console.log(`🎉 Implementation batch completed. Results: ${results.length} tasks processed`)
+
           return NextResponse.json({
             success: true,
             results,
-            message: `Processed ${results.length} tasks`,
+            message: `Processed ${results.length} tasks. ${results.filter((r) => r.status === "completed").length} completed, ${results.filter((r) => r.status === "failed").length} failed.`,
           })
 
         case "generate_ai_tasks":
           if (!credentials.gemini_api_key) {
-            return NextResponse.json({ success: false, error: "Gemini API key required" })
+            return NextResponse.json({ success: false, error: "Gemini API key required for AI task generation" })
           }
 
-          const aiAgentForGeneration = new AIAgent(credentials.gemini_api_key, githubStorage, github)
-          const generatedTasks = await aiAgentForGeneration.generateTasks(project.description, project.framework)
+          console.log(`🤖 Generating AI tasks for project: ${project.name}`)
 
-          // Save generated tasks
-          for (const task of generatedTasks) {
-            await githubStorage.createTask(task)
+          const aiTaskAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
+
+          try {
+            const generatedTasks = await aiTaskAgent.generateTasks(project.description, project.framework)
+
+            // Save all generated tasks
+            for (const task of generatedTasks) {
+              await githubStorage.createTask(task)
+            }
+
+            console.log(`✅ Generated ${generatedTasks.length} AI tasks`)
+
+            return NextResponse.json({
+              success: true,
+              tasks: generatedTasks,
+              message: `Generated ${generatedTasks.length} AI tasks`,
+            })
+          } catch (error) {
+            console.error("❌ AI task generation failed:", error)
+            return NextResponse.json({
+              success: false,
+              error: `AI task generation failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+            })
           }
 
-          return NextResponse.json({
-            success: true,
-            tasks: generatedTasks,
-            message: `Generated ${generatedTasks.length} AI tasks`,
-          })
+        case "delete":
+          if (!taskId) {
+            return NextResponse.json({ success: false, error: "Task ID required" })
+          }
+
+          await githubStorage.deleteTask(taskId)
+          return NextResponse.json({ success: true, message: "Task deleted successfully" })
 
         default:
           return NextResponse.json({ success: false, error: "Invalid action" })
       }
     } catch (error) {
-      console.error("Tasks POST API error:", error)
+      console.error("Tasks API error:", error)
       return NextResponse.json({
         success: false,
         error: error instanceof Error ? error.message : "Failed to process task request",

@@ -34,6 +34,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   const [replyingTo, setReplyingTo] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
+  const [scrollRestored, setScrollRestored] = useState(false)
 
   useEffect(() => {
     if (isOpen) {
@@ -41,24 +42,33 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }, [isOpen, projectId])
 
-  // Restore scroll position
+  // Restore scroll position after messages are loaded
   useEffect(() => {
-    if (isOpen && scrollAreaRef.current && messages.length > 0) {
+    if (isOpen && scrollAreaRef.current && messages.length > 0 && !scrollRestored) {
       const savedPosition = localStorage.getItem(`chat-scroll-${projectId}`)
-      if (savedPosition && !shouldAutoScroll) {
+      if (savedPosition) {
         setTimeout(() => {
           if (scrollAreaRef.current) {
             scrollAreaRef.current.scrollTop = Number.parseInt(savedPosition)
+            setScrollRestored(true)
           }
-        }, 100)
+        }, 200) // Increased delay to ensure content is fully rendered
+      } else {
+        // If no saved position, scroll to bottom
+        setTimeout(() => {
+          if (scrollAreaRef.current) {
+            scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
+            setScrollRestored(true)
+          }
+        }, 200)
       }
     }
-  }, [isOpen, projectId, messages.length])
+  }, [isOpen, projectId, messages.length, scrollRestored])
 
   // Handle scroll events
   useEffect(() => {
     const scrollArea = scrollAreaRef.current
-    if (scrollArea) {
+    if (scrollArea && scrollRestored) {
       const handleScroll = () => {
         const position = scrollArea.scrollTop
         const maxScroll = scrollArea.scrollHeight - scrollArea.clientHeight
@@ -73,14 +83,14 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
       scrollArea.addEventListener("scroll", handleScroll)
       return () => scrollArea.removeEventListener("scroll", handleScroll)
     }
-  }, [projectId])
+  }, [projectId, scrollRestored])
 
   // Auto-scroll to bottom when appropriate
   useEffect(() => {
-    if (scrollAreaRef.current && shouldAutoScroll) {
+    if (scrollAreaRef.current && shouldAutoScroll && scrollRestored) {
       scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
     }
-  }, [messages, shouldAutoScroll])
+  }, [messages, shouldAutoScroll, scrollRestored])
 
   const loadChatHistory = async () => {
     try {
@@ -109,6 +119,124 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }
 
+  const handleRealTaskImplementation = async (message: string): Promise<string> => {
+    const lowerMessage = message.toLowerCase()
+
+    if (lowerMessage.includes("implement all") || lowerMessage.includes("implement the tasks")) {
+      setAgentStatus("working")
+
+      const implementingMessage: Message = {
+        id: `msg_${Date.now()}_implementing`,
+        role: "agent",
+        content: "🔨 Starting implementation of all pending tasks... This may take a few minutes.",
+        timestamp: new Date().toISOString(),
+        type: "file_operation",
+      }
+      setMessages((prev) => [...prev, implementingMessage])
+
+      try {
+        const response = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            projectId,
+            action: "implement_all",
+          }),
+        })
+
+        const data = await response.json()
+
+        if (data.success) {
+          const completedCount = data.results.filter((r: any) => r.status === "completed").length
+          const failedCount = data.results.filter((r: any) => r.status === "failed").length
+
+          let resultMessage = `✅ Implementation completed!\n\n📊 Results:\n- ✅ Completed: ${completedCount} tasks\n- ❌ Failed: ${failedCount} tasks\n\n`
+
+          if (completedCount > 0) {
+            resultMessage += "🎉 Successfully implemented tasks:\n"
+            data.results
+              .filter((r: any) => r.status === "completed")
+              .forEach((r: any) => {
+                resultMessage += `- ${r.title} (${r.files} files modified)\n`
+              })
+          }
+
+          if (failedCount > 0) {
+            resultMessage += "\n❌ Failed tasks:\n"
+            data.results
+              .filter((r: any) => r.status === "failed")
+              .forEach((r: any) => {
+                resultMessage += `- ${r.title}: ${r.error}\n`
+              })
+          }
+
+          onUpdate?.("tasks_implemented", "implementation_completed")
+          return resultMessage
+        } else {
+          return `❌ Implementation failed: ${data.error}`
+        }
+      } catch (error) {
+        return `❌ Implementation error: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    if (lowerMessage.includes("implement") && lowerMessage.includes("task")) {
+      // Try to extract task ID or implement first pending task
+      try {
+        const tasksResponse = await fetch(`/api/tasks?projectId=${projectId}`, {
+          credentials: "include",
+        })
+
+        if (tasksResponse.ok) {
+          const tasksData = await tasksResponse.json()
+          const pendingTasks = tasksData.tasks?.filter((t: any) => t.status === "pending") || []
+
+          if (pendingTasks.length > 0) {
+            const taskToImplement = pendingTasks[0]
+
+            setAgentStatus("working")
+
+            const implementingMessage: Message = {
+              id: `msg_${Date.now()}_implementing_single`,
+              role: "agent",
+              content: `🔨 Implementing task: "${taskToImplement.title}"...`,
+              timestamp: new Date().toISOString(),
+              type: "file_operation",
+            }
+            setMessages((prev) => [...prev, implementingMessage])
+
+            const response = await fetch("/api/tasks", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({
+                projectId,
+                action: "implement",
+                taskId: taskToImplement.id,
+              }),
+            })
+
+            const data = await response.json()
+
+            if (data.success) {
+              onUpdate?.("task_implemented", "task_implemented")
+              return `✅ Successfully implemented task: "${taskToImplement.title}"\n\n📁 Files modified: ${data.filesModified}\n💬 ${data.implementation?.message || "Implementation completed"}`
+            } else {
+              return `❌ Failed to implement task: ${data.error}`
+            }
+          } else {
+            return "ℹ️ No pending tasks found to implement."
+          }
+        }
+      } catch (error) {
+        return `❌ Error implementing task: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    return ""
+  }
+
   const handleAutonomousFollowUp = async (agentResponse: string, currentMessages: Message[]) => {
     // Check if the response contains tool calls or indicates the agent will do something
     const needsFollowUp =
@@ -122,7 +250,8 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
       agentResponse.includes("I'll inspect") ||
       agentResponse.includes("I'll fix") ||
       agentResponse.includes("I'll deploy") ||
-      agentResponse.includes("I'll commit")
+      agentResponse.includes("I'll commit") ||
+      agentResponse.includes("I'll implement")
 
     if (needsFollowUp) {
       // Wait a moment then trigger autonomous follow-up
@@ -183,12 +312,31 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
     const newMessages = [...messages, userMessage]
     setMessages(newMessages)
+    const originalInput = inputValue
     setInputValue("")
     setReplyingTo(null)
     setIsLoading(true)
     setAgentStatus("thinking")
 
     try {
+      // First check if this is a task implementation request
+      const taskImplementationResult = await handleRealTaskImplementation(originalInput)
+
+      if (taskImplementationResult) {
+        // This was a task implementation request
+        const taskResultMessage: Message = {
+          id: `msg_${Date.now()}_task_result`,
+          role: "agent",
+          content: taskImplementationResult,
+          timestamp: new Date().toISOString(),
+          type: "file_operation",
+        }
+        setMessages((prev) => [...prev, taskResultMessage])
+        setAgentStatus("idle")
+        return
+      }
+
+      // Otherwise, proceed with normal chat
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -196,7 +344,7 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
         body: JSON.stringify({
           projectId,
           action: "chat",
-          message: inputValue,
+          message: originalInput,
           conversationHistory: newMessages.slice(-10),
           replyTo: replyingTo,
         }),
@@ -215,9 +363,6 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
 
         const finalMessages = [...newMessages, agentMessage]
         setMessages(finalMessages)
-
-        // Handle special actions
-        await handleSpecialActions(inputValue, finalMessages)
 
         // Trigger autonomous follow-up
         await handleAutonomousFollowUp(data.response, finalMessages)
@@ -242,91 +387,6 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }
 
-  const handleSpecialActions = async (message: string, currentMessages: Message[]) => {
-    const lowerMessage = message.toLowerCase()
-
-    // Task creation
-    if (lowerMessage.includes("create task") || lowerMessage.includes("add task")) {
-      setAgentStatus("working")
-
-      // Extract task details from message
-      const taskTitle = message.match(/create task[:\s]+(.+)/i)?.[1] || "New Task"
-
-      try {
-        const response = await fetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            projectId,
-            action: "create",
-            taskData: {
-              title: taskTitle,
-              description: `Task created from chat: ${message}`,
-              priority: "medium",
-            },
-          }),
-        })
-
-        if (response.ok) {
-          const taskMessage: Message = {
-            id: `msg_${Date.now()}_task_created`,
-            role: "agent",
-            content: `✅ Task created successfully: "${taskTitle}"`,
-            timestamp: new Date().toISOString(),
-            type: "task",
-          }
-          setMessages((prev) => [...prev, taskMessage])
-          onUpdate?.("task_created", "task_created")
-        }
-      } catch (error) {
-        console.error("Error creating task:", error)
-      }
-    }
-
-    // Task implementation
-    if (lowerMessage.includes("implement") && (lowerMessage.includes("task") || lowerMessage.includes("all"))) {
-      setAgentStatus("working")
-
-      const implementMessage: Message = {
-        id: `msg_${Date.now()}_implementing`,
-        role: "agent",
-        content: "🔨 Starting implementation... I'll work on the tasks and update the code files.",
-        timestamp: new Date().toISOString(),
-        type: "file_operation",
-      }
-      setMessages((prev) => [...prev, implementMessage])
-
-      try {
-        const action = lowerMessage.includes("all") ? "implement_all" : "implement"
-        const response = await fetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            projectId,
-            action,
-          }),
-        })
-
-        if (response.ok) {
-          const data = await response.json()
-          const completionMessage: Message = {
-            id: `msg_${Date.now()}_implementation_complete`,
-            role: "agent",
-            content: `✅ Implementation completed! ${data.results ? `Processed ${data.results.length} tasks.` : "Task completed successfully."}`,
-            timestamp: new Date().toISOString(),
-            type: "file_operation",
-          }
-          setMessages((prev) => [...prev, completionMessage])
-          onUpdate?.("implementation_completed", "implementation_completed")
-        }
-      } catch (error) {
-        console.error("Error implementing tasks:", error)
-      }
-    }
-  }
-
   const handleReply = (messageId: string) => {
     setReplyingTo(messageId)
     const replyMessage = messages.find((m) => m.id === messageId)
@@ -338,6 +398,13 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
   const getReplyMessage = (replyToId: string) => {
     return messages.find((m) => m.id === replyToId)
   }
+
+  // Reset scroll restoration when opening chat
+  useEffect(() => {
+    if (isOpen) {
+      setScrollRestored(false)
+    }
+  }, [isOpen])
 
   if (!isOpen) {
     return (

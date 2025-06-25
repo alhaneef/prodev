@@ -109,67 +109,13 @@ export async function POST(request: NextRequest) {
             project,
             githubStorage,
             github,
+            credentials,
           )
           return NextResponse.json({
             success: true,
             response: followUpResponse.response,
             needsMoreFollowUp: followUpResponse.needsMoreFollowUp,
           })
-
-        case "implement_task":
-          const { taskId } = await request.json()
-          if (!taskId) {
-            return NextResponse.json({ success: false, error: "Task ID required" })
-          }
-
-          const tasks = await githubStorage.getTasks()
-          const task = tasks.find((t) => t.id === taskId)
-
-          if (!task) {
-            return NextResponse.json({ success: false, error: "Task not found" })
-          }
-
-          // Mark task as in-progress
-          await githubStorage.updateTask(taskId, { status: "in-progress" })
-
-          try {
-            const implementation = await aiAgent.implementTask(task, project)
-
-            // Mark task as completed
-            await githubStorage.updateTask(taskId, { status: "completed" })
-
-            return NextResponse.json({
-              success: true,
-              implementation,
-              message: "Task implemented successfully",
-            })
-          } catch (error) {
-            // Mark task as failed
-            await githubStorage.updateTask(taskId, { status: "failed" })
-            throw error
-          }
-
-        case "deploy":
-          // Handle deployment from chat
-          const deployResponse = await fetch(`${request.url.replace("/api/chat", "/api/deploy")}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ projectId, platform: "vercel" }),
-          })
-
-          const deployResult = await deployResponse.json()
-
-          if (deployResult.success) {
-            return NextResponse.json({
-              success: true,
-              response: `🚀 Deployment successful! Your app is live at: ${deployResult.deploymentUrl}`,
-            })
-          } else {
-            return NextResponse.json({
-              success: true,
-              response: `❌ Deployment failed: ${deployResult.error}. I'm working on fixing this automatically...`,
-            })
-          }
 
         default:
           return NextResponse.json({ success: false, error: "Invalid action" })
@@ -197,6 +143,7 @@ async function handleAutonomousFollowUp(
   project: any,
   githubStorage: GitHubStorageService,
   github: GitHubService,
+  credentials: any,
 ): Promise<{ response: string; needsMoreFollowUp: boolean }> {
   // Get the last agent message to understand what it planned to do
   const lastAgentMessage = conversationHistory.filter((msg) => msg.role === "agent").pop()?.content || ""
@@ -205,6 +152,8 @@ async function handleAutonomousFollowUp(
   let needsMoreFollowUp = false
 
   try {
+    console.log("🤖 Autonomous follow-up triggered for:", lastAgentMessage.slice(0, 100))
+
     // Check what the agent said it would do and execute it
     if (lastAgentMessage.includes("I'll check") || lastAgentMessage.includes("I'll examine")) {
       // Execute file checking/examination
@@ -232,9 +181,76 @@ async function handleAutonomousFollowUp(
       }
     }
 
+    if (lastAgentMessage.includes("I'll implement") || lastAgentMessage.includes("implement all")) {
+      // Execute task implementation
+      response = "🔨 Starting task implementation...\n\n"
+
+      try {
+        // Get pending tasks
+        const tasks = await githubStorage.getTasks()
+        const pendingTasks = tasks.filter((t) => t.status === "pending")
+
+        if (pendingTasks.length === 0) {
+          response += "ℹ️ No pending tasks found to implement."
+        } else {
+          response += `📋 Found ${pendingTasks.length} pending tasks. Implementing now...\n\n`
+
+          // Implement tasks (limit to 2 for autonomous execution)
+          const tasksToImplement = pendingTasks.slice(0, 2)
+          const results = []
+
+          for (const task of tasksToImplement) {
+            try {
+              console.log(`🔨 Implementing task: ${task.title}`)
+
+              // Mark as in-progress
+              await githubStorage.updateTask(task.id, { status: "in-progress" })
+
+              const implementation = await aiAgent.implementTask(task, project)
+
+              // Mark as completed
+              await githubStorage.updateTask(task.id, {
+                status: "completed",
+                updatedAt: new Date().toISOString(),
+              })
+
+              results.push({
+                title: task.title,
+                status: "completed",
+                files: implementation.files.length,
+              })
+
+              response += `✅ Completed: ${task.title} (${implementation.files.length} files)\n`
+            } catch (error) {
+              console.error(`❌ Failed to implement task: ${task.title}`, error)
+
+              // Mark as failed
+              await githubStorage.updateTask(task.id, {
+                status: "failed",
+                updatedAt: new Date().toISOString(),
+              })
+
+              results.push({
+                title: task.title,
+                status: "failed",
+                error: error instanceof Error ? error.message : "Unknown error",
+              })
+
+              response += `❌ Failed: ${task.title} - ${error instanceof Error ? error.message : "Unknown error"}\n`
+            }
+          }
+
+          const completedCount = results.filter((r) => r.status === "completed").length
+          response += `\n🎉 Implementation completed: ${completedCount}/${tasksToImplement.length} tasks successful`
+        }
+      } catch (error) {
+        response += `❌ Error during implementation: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
     if (lastAgentMessage.includes("I'll fix") || lastAgentMessage.includes("I'll validate")) {
       // Execute fixing actions
-      response = "🔧 Applying fixes to the codebase...\n"
+      response = "🔧 Applying fixes to the codebase...\n\n"
 
       try {
         // Get current files and apply basic fixes
@@ -297,11 +313,11 @@ async function handleAutonomousFollowUp(
 
     if (lastAgentMessage.includes("I'll deploy") || lastAgentMessage.includes("I'll redeploy")) {
       // Execute deployment
-      response = "🚀 Starting deployment...\n"
+      response = "🚀 Starting deployment...\n\n"
 
       try {
-        // Trigger deployment
-        const deployResponse = await fetch("/api/deploy", {
+        // Trigger deployment via internal API call
+        const deployResponse = await fetch(`${process.env.NEXTAUTH_URL || "http://localhost:3000"}/api/deploy`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ projectId: project.id, platform: "vercel" }),
@@ -357,8 +373,11 @@ async function handleAutonomousFollowUp(
       }
     }
 
+    console.log("✅ Autonomous follow-up completed:", response.slice(0, 100))
+
     return { response, needsMoreFollowUp }
   } catch (error) {
+    console.error("❌ Autonomous follow-up error:", error)
     return {
       response: `❌ Error during autonomous follow-up: ${error instanceof Error ? error.message : "Unknown error"}`,
       needsMoreFollowUp: false,
