@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Input } from "@/components/ui/input"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Play,
   Square,
@@ -21,8 +22,10 @@ import {
   Save,
   Search,
   FolderOpen,
+  AlertTriangle,
+  ExternalLink,
 } from "lucide-react"
-import { WebContainer } from "@webcontainer/api"
+import { WebContainerManager } from "@/lib/webcontainer-service"
 
 interface WebContainerPreviewProps {
   projectId: string
@@ -51,24 +54,26 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(["src", "public", "components"]))
   const [searchQuery, setSearchQuery] = useState("")
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const [containerError, setContainerError] = useState<string | null>(null)
+  const [useWebContainer, setUseWebContainer] = useState(true)
+  const [sessionStats, setSessionStats] = useState<any>(null)
 
-  const webContainerRef = useRef<WebContainer | null>(null)
+  const webContainerManager = WebContainerManager.getInstance()
   const terminalRef = useRef<HTMLDivElement>(null)
-  const fileCache = useRef<Map<string, { content: string; lastModified: string }>>(new Map())
+  const fileCache = useRef<Map<string, { content: string; lastModified: string; hash: string }>>(new Map())
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const lastSyncHash = useRef<string>("")
 
   useEffect(() => {
-    initializeWebContainer()
+    initializeEnvironment()
     loadProjectFiles()
     loadCacheFromStorage()
 
-    // Set up periodic cache refresh
-    const cacheRefreshInterval = setInterval(() => {
-      refreshFileCache()
-    }, 30000) // Refresh every 30 seconds
-
     return () => {
-      clearInterval(cacheRefreshInterval)
-      cleanupWebContainer()
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current)
+      }
+      webContainerManager.destroySession(projectId)
     }
   }, [projectId])
 
@@ -77,6 +82,58 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight
     }
   }, [terminalOutput])
+
+  const initializeEnvironment = async () => {
+    // Check if WebContainer is supported
+    if (!crossOriginIsolated) {
+      setContainerError("WebContainer requires Cross-Origin Isolation. Using fallback mode.")
+      setUseWebContainer(false)
+      addTerminalOutput("⚠️ WebContainer not available, using fallback mode")
+      return
+    }
+
+    try {
+      addTerminalOutput("🚀 Initializing WebContainer...")
+      const session = await webContainerManager.getSession(projectId)
+
+      if (session.isReady) {
+        setIsContainerReady(true)
+        addTerminalOutput("✅ WebContainer ready")
+        updateSessionStats()
+      } else {
+        // Wait for container to be ready
+        const checkReady = setInterval(() => {
+          if (session.isReady) {
+            setIsContainerReady(true)
+            addTerminalOutput("✅ WebContainer ready")
+            updateSessionStats()
+            clearInterval(checkReady)
+          }
+        }, 1000)
+
+        // Timeout after 30 seconds
+        setTimeout(() => {
+          clearInterval(checkReady)
+          if (!session.isReady) {
+            setContainerError("WebContainer initialization timeout. Using fallback mode.")
+            setUseWebContainer(false)
+            addTerminalOutput("⚠️ WebContainer timeout, switching to fallback mode")
+          }
+        }, 30000)
+      }
+    } catch (error) {
+      console.error("Failed to initialize WebContainer:", error)
+      setContainerError(`WebContainer failed: ${error instanceof Error ? error.message : "Unknown error"}`)
+      setUseWebContainer(false)
+      addTerminalOutput(`❌ WebContainer failed: ${error instanceof Error ? error.message : "Unknown error"}`)
+      addTerminalOutput("🔄 Switching to fallback mode")
+    }
+  }
+
+  const updateSessionStats = () => {
+    const stats = webContainerManager.getSessionStats()
+    setSessionStats(stats)
+  }
 
   const loadCacheFromStorage = () => {
     try {
@@ -100,17 +157,63 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     }
   }
 
-  const initializeWebContainer = async () => {
+  const generateContentHash = (content: string): string => {
+    // Simple hash function for change detection
+    let hash = 0
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i)
+      hash = (hash << 5) - hash + char
+      hash = hash & hash // Convert to 32-bit integer
+    }
+    return hash.toString()
+  }
+
+  const scheduleSync = useCallback(() => {
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current)
+    }
+
+    syncTimeoutRef.current = setTimeout(() => {
+      syncChangesIfNeeded()
+    }, 2000) // Sync after 2 seconds of inactivity
+  }, [])
+
+  const syncChangesIfNeeded = async () => {
     try {
-      addTerminalOutput("🚀 Initializing WebContainer...")
-      webContainerRef.current = await WebContainer.boot()
-      setIsContainerReady(true)
-      addTerminalOutput("✅ WebContainer ready")
+      // Generate current state hash
+      const currentFiles = Array.from(fileCache.current.entries())
+      const currentHash = generateContentHash(JSON.stringify(currentFiles))
+
+      if (currentHash === lastSyncHash.current) {
+        return // No changes to sync
+      }
+
+      addTerminalOutput("🔄 Syncing changes...")
+
+      // Sync to GitHub
+      const response = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "bulk_update",
+          files: currentFiles.map(([path, data]) => ({
+            path,
+            content: data.content,
+          })),
+        }),
+      })
+
+      if (response.ok) {
+        lastSyncHash.current = currentHash
+        addTerminalOutput("✅ Changes synced to GitHub")
+      } else {
+        addTerminalOutput("❌ Failed to sync changes")
+      }
     } catch (error) {
-      console.error("Failed to initialize WebContainer:", error)
-      addTerminalOutput(
-        `❌ WebContainer initialization failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-      )
+      console.error("Error syncing changes:", error)
+      addTerminalOutput(`❌ Sync error: ${error instanceof Error ? error.message : "Unknown error"}`)
     }
   }
 
@@ -130,8 +233,8 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
           setFiles(processedFiles)
           addTerminalOutput(`✅ Loaded ${data.files.length} files`)
 
-          // Mount files to WebContainer
-          if (isContainerReady && webContainerRef.current) {
+          // Mount files to WebContainer if available
+          if (useWebContainer && isContainerReady) {
             await mountFilesToWebContainer(data.files)
           }
         } else {
@@ -152,7 +255,6 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     const tree: FileNode[] = []
     const pathMap = new Map<string, FileNode>()
 
-    // Sort files to ensure directories come before their contents
     fileList.sort((a, b) => {
       if (a.type === "dir" && b.type === "file") return -1
       if (a.type === "file" && b.type === "dir") return 1
@@ -197,9 +299,12 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
   }
 
   const mountFilesToWebContainer = async (fileList: any[]) => {
-    if (!webContainerRef.current) return
+    if (!useWebContainer) return
 
     try {
+      const session = await webContainerManager.getSession(projectId)
+      if (!session.container) return
+
       addTerminalOutput("🔧 Mounting files to WebContainer...")
       const fileStructure: Record<string, any> = {}
 
@@ -218,7 +323,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
         }
       }
 
-      await webContainerRef.current.mount(fileStructure)
+      await session.container.mount(fileStructure)
       addTerminalOutput("✅ Files mounted to WebContainer")
     } catch (error) {
       console.error("Error mounting files:", error)
@@ -262,6 +367,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
         fileCache.current.set(filePath, {
           content,
           lastModified: new Date().toISOString(),
+          hash: generateContentHash(content),
         })
         saveCacheToStorage()
 
@@ -275,63 +381,59 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
 
   const saveFileContent = async (filePath: string, content: string) => {
     try {
-      const response = await fetch("/api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          projectId,
-          action: "update",
-          filePath,
-          content,
-        }),
+      // Update cache immediately
+      fileCache.current.set(filePath, {
+        content,
+        lastModified: new Date().toISOString(),
+        hash: generateContentHash(content),
       })
+      saveCacheToStorage()
 
-      if (response.ok) {
-        // Update cache
-        fileCache.current.set(filePath, {
-          content,
-          lastModified: new Date().toISOString(),
-        })
-        saveCacheToStorage()
-
-        // Update WebContainer
-        if (webContainerRef.current) {
-          await webContainerRef.current.fs.writeFile(filePath, content)
+      // Update WebContainer if available
+      if (useWebContainer && isContainerReady) {
+        try {
+          const session = await webContainerManager.getSession(projectId)
+          if (session.container) {
+            await session.container.fs.writeFile(filePath, content)
+            webContainerManager.updateActivity(projectId)
+          }
+        } catch (error) {
+          console.error("Error updating WebContainer file:", error)
         }
-
-        setHasUnsavedChanges(false)
-        addTerminalOutput(`💾 Saved ${filePath}`)
-      } else {
-        addTerminalOutput(`❌ Failed to save ${filePath}`)
       }
+
+      setHasUnsavedChanges(false)
+      addTerminalOutput(`💾 Saved ${filePath}`)
+
+      // Schedule sync
+      scheduleSync()
     } catch (error) {
       console.error("Error saving file:", error)
       addTerminalOutput(`❌ Error saving ${filePath}: ${error instanceof Error ? error.message : "Unknown error"}`)
     }
   }
 
-  const refreshFileCache = async () => {
-    try {
-      // Refresh file list and update cache
-      await loadProjectFiles()
-    } catch (error) {
-      console.error("Error refreshing cache:", error)
-    }
-  }
-
   const startDevServer = async () => {
-    if (!webContainerRef.current || !isContainerReady) {
-      addTerminalOutput("❌ WebContainer not ready")
+    if (!useWebContainer) {
+      // Fallback: Open GitHub Codespaces or similar
+      addTerminalOutput("🌐 Opening external development environment...")
+      const githubUrl = `https://github.com/codespaces/new?repo=${projectId}`
+      window.open(githubUrl, "_blank")
       return
     }
 
     try {
+      const session = await webContainerManager.getSession(projectId)
+      if (!session.container) {
+        addTerminalOutput("❌ WebContainer not available")
+        return
+      }
+
       setIsRunning(true)
       addTerminalOutput("🚀 Installing dependencies...")
 
       // Install dependencies
-      const installProcess = await webContainerRef.current.spawn("npm", ["install"])
+      const installProcess = await session.container.spawn("npm", ["install"])
       installProcess.output.pipeTo(
         new WritableStream({
           write(data) {
@@ -351,7 +453,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
       addTerminalOutput("🚀 Starting development server...")
 
       // Start dev server
-      const devProcess = await webContainerRef.current.spawn("npm", ["run", "dev"])
+      const devProcess = await session.container.spawn("npm", ["run", "dev"])
       devProcess.output.pipeTo(
         new WritableStream({
           write(data) {
@@ -361,10 +463,12 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
       )
 
       // Listen for server ready event
-      webContainerRef.current.on("server-ready", (port, url) => {
+      session.container.on("server-ready", (port, url) => {
         setPreviewUrl(url)
         addTerminalOutput(`✅ Development server ready at ${url}`)
       })
+
+      webContainerManager.updateActivity(projectId)
     } catch (error) {
       console.error("Error starting dev server:", error)
       addTerminalOutput(`❌ Failed to start dev server: ${error instanceof Error ? error.message : "Unknown error"}`)
@@ -379,15 +483,26 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
   }
 
   const executeCommand = async () => {
-    if (!commandInput.trim() || !webContainerRef.current) return
+    if (!commandInput.trim()) return
 
     const command = commandInput.trim()
     setCommandInput("")
     addTerminalOutput(`$ ${command}`)
 
+    if (!useWebContainer) {
+      addTerminalOutput("❌ Terminal not available in fallback mode")
+      return
+    }
+
     try {
+      const session = await webContainerManager.getSession(projectId)
+      if (!session.container) {
+        addTerminalOutput("❌ WebContainer not available")
+        return
+      }
+
       const [cmd, ...args] = command.split(" ")
-      const process = await webContainerRef.current.spawn(cmd, args)
+      const process = await session.container.spawn(cmd, args)
 
       process.output.pipeTo(
         new WritableStream({
@@ -399,14 +514,10 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
 
       const exitCode = await process.exit
       addTerminalOutput(`Process exited with code ${exitCode}`)
+
+      webContainerManager.updateActivity(projectId)
     } catch (error) {
       addTerminalOutput(`❌ Command failed: ${error instanceof Error ? error.message : "Unknown error"}`)
-    }
-  }
-
-  const cleanupWebContainer = () => {
-    if (webContainerRef.current) {
-      webContainerRef.current.teardown()
     }
   }
 
@@ -513,6 +624,14 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
 
   return (
     <div className="space-y-4">
+      {/* Error Alert */}
+      {containerError && (
+        <Alert>
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{containerError}</AlertDescription>
+        </Alert>
+      )}
+
       {/* Status Bar */}
       <Card>
         <CardHeader className="pb-3">
@@ -520,20 +639,26 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
             <CardTitle className="flex items-center gap-2">
               <Globe className="h-5 w-5" />
               Development Environment
+              {!useWebContainer && <Badge variant="outline">Fallback Mode</Badge>}
             </CardTitle>
             <div className="flex items-center gap-2">
+              {sessionStats && (
+                <Badge variant="outline">
+                  Sessions: {sessionStats.active}/{sessionStats.limit}
+                </Badge>
+              )}
               <Badge variant={isContainerReady ? "default" : "secondary"}>
                 {isContainerReady ? "Ready" : "Loading"}
               </Badge>
               <Badge variant={isRunning ? "default" : "secondary"}>{isRunning ? "Running" : "Stopped"}</Badge>
-              <Button onClick={refreshFileCache} variant="outline" size="sm">
+              <Button onClick={loadProjectFiles} variant="outline" size="sm">
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Refresh
               </Button>
               {!isRunning ? (
-                <Button onClick={startDevServer} size="sm" disabled={!isContainerReady}>
+                <Button onClick={startDevServer} size="sm">
                   <Play className="h-4 w-4 mr-2" />
-                  Start Dev
+                  {useWebContainer ? "Start Dev" : "Open External"}
                 </Button>
               ) : (
                 <Button onClick={stopDevServer} variant="outline" size="sm">
@@ -597,12 +722,20 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                   <TabsTrigger value="preview">Preview</TabsTrigger>
                   <TabsTrigger value="terminal">Terminal</TabsTrigger>
                 </TabsList>
-                {selectedFile && hasUnsavedChanges && (
-                  <Button onClick={handleSaveFile} size="sm">
-                    <Save className="h-4 w-4 mr-2" />
-                    Save
-                  </Button>
-                )}
+                <div className="flex items-center gap-2">
+                  {selectedFile && hasUnsavedChanges && (
+                    <Button onClick={handleSaveFile} size="sm">
+                      <Save className="h-4 w-4 mr-2" />
+                      Save
+                    </Button>
+                  )}
+                  {previewUrl && (
+                    <Button variant="outline" size="sm" onClick={() => window.open(previewUrl, "_blank")}>
+                      <ExternalLink className="h-4 w-4 mr-2" />
+                      Open
+                    </Button>
+                  )}
+                </div>
               </div>
             </CardHeader>
 
@@ -643,10 +776,14 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                     <div className="text-center">
                       <Globe className="h-12 w-12 mx-auto mb-4 opacity-50" />
                       <p className="text-lg font-medium mb-2">No preview available</p>
-                      <p className="text-sm mb-4">Start the development server to see your app</p>
-                      <Button onClick={startDevServer} disabled={!isContainerReady}>
+                      <p className="text-sm mb-4">
+                        {useWebContainer
+                          ? "Start the development server to see your app"
+                          : "Use external development environment for preview"}
+                      </p>
+                      <Button onClick={startDevServer}>
                         <Play className="h-4 w-4 mr-2" />
-                        Start Development Server
+                        {useWebContainer ? "Start Development Server" : "Open External Environment"}
                       </Button>
                     </div>
                   </div>
@@ -658,6 +795,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                   <div className="flex items-center gap-2 p-3 border-b border-slate-700">
                     <Terminal className="h-4 w-4" />
                     <span className="font-medium">Terminal</span>
+                    {!useWebContainer && <Badge variant="outline">Limited</Badge>}
                   </div>
                   <ScrollArea className="flex-1 p-4 font-mono text-sm" ref={terminalRef}>
                     <div className="space-y-1">
@@ -665,7 +803,11 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                         <div key={index}>{line}</div>
                       ))}
                       {terminalOutput.length === 0 && (
-                        <div className="text-slate-500">WebContainer terminal ready...</div>
+                        <div className="text-slate-500">
+                          {useWebContainer
+                            ? "WebContainer terminal ready..."
+                            : "Terminal not available in fallback mode"}
+                        </div>
                       )}
                     </div>
                   </ScrollArea>
@@ -679,11 +821,11 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                             executeCommand()
                           }
                         }}
-                        placeholder="Enter command..."
+                        placeholder={useWebContainer ? "Enter command..." : "Terminal not available"}
                         className="bg-black border-slate-700 text-green-400 font-mono"
-                        disabled={!isContainerReady}
+                        disabled={!useWebContainer}
                       />
-                      <Button onClick={executeCommand} disabled={!isContainerReady || !commandInput.trim()}>
+                      <Button onClick={executeCommand} disabled={!useWebContainer || !commandInput.trim()}>
                         Run
                       </Button>
                     </div>
