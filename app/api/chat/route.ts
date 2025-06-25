@@ -3,7 +3,7 @@ import { getUserFromSession } from "@/lib/auth"
 import { GitHubService } from "@/lib/github-service"
 import { GitHubStorageService } from "@/lib/github-storage"
 import { AIAgent } from "@/lib/ai-agent"
-import { db } from "@/lib/db" // Declare the db variable
+import { db } from "@/lib/database" // Declare the db variable
 
 export async function GET(request: NextRequest) {
   try {
