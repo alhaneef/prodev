@@ -1,104 +1,164 @@
-import { Octokit } from "@octokit/rest"
+export interface GitHubFile {
+  name: string
+  path: string
+  sha: string
+  size: number
+  type: "file" | "dir"
+  content?: string
+  encoding?: string
+  download_url?: string
+}
 
-/**
- * Thin wrapper around Octokit with convenience helpers that the
- * rest of the platform already relies on.
- */
 export class GitHubService {
-  private octokit: Octokit
+  private token: string
+  private baseUrl = "https://api.github.com"
 
   constructor(token: string) {
-    if (!token) {
-      throw new Error(
-        "GitHubService requires a personal-access token. " + "Pass it explicitly or set the GITHUB_TOKEN env var.",
-      )
+    this.token = token
+  }
+
+  private async request(endpoint: string, options: RequestInit = {}): Promise<any> {
+    const url = `${this.baseUrl}${endpoint}`
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`GitHub API error: ${response.status} ${error}`)
     }
-    this.octokit = new Octokit({ auth: token })
+
+    return response.json()
   }
 
-  /* ------------------------------------------------------------------ *
-   * Repositories                                                        *
-   * ------------------------------------------------------------------ */
+  async getRepository(owner: string, repo: string): Promise<any> {
+    return this.request(`/repos/${owner}/${repo}`)
+  }
 
-  async createRepository(name: string, description = "", isPrivate = true) {
-    const { data } = await this.octokit.repos.createForAuthenticatedUser({
-      name,
-      description,
-      private: isPrivate,
-      auto_init: true,
+  async createRepository(name: string, description: string, isPrivate = false): Promise<any> {
+    return this.request("/user/repos", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        description,
+        private: isPrivate,
+        auto_init: true,
+      }),
     })
-    return data
   }
 
-  async getRepository(owner: string, repo: string) {
-    const { data } = await this.octokit.repos.get({ owner, repo })
-    return data
-  }
+  async getAllRepositoryFiles(owner: string, repo: string, path = ""): Promise<GitHubFile[]> {
+    try {
+      const allFiles: GitHubFile[] = []
 
-  /* ------------------------------------------------------------------ *
-   * Files                                                               *
-   * ------------------------------------------------------------------ */
+      const getFilesRecursively = async (currentPath: string): Promise<void> => {
+        try {
+          const contents = await this.request(`/repos/${owner}/${repo}/contents/${currentPath}`)
+          const items = Array.isArray(contents) ? contents : [contents]
 
-  async createOrUpdateFile(owner: string, repo: string, path: string, content: string, message: string, sha?: string) {
-    const { data } = await this.octokit.repos.createOrUpdateFileContents({
-      owner,
-      repo,
-      path,
-      message,
-      content: Buffer.from(content).toString("base64"),
-      sha,
-    })
-    return data
-  }
+          for (const item of items) {
+            allFiles.push({
+              name: item.name,
+              path: item.path,
+              sha: item.sha,
+              size: item.size || 0,
+              type: item.type,
+              download_url: item.download_url,
+            })
 
-  async getFileContent(owner: string, repo: string, path: string) {
-    const { data } = await this.octokit.repos.getContent({ owner, repo, path })
-
-    if ("content" in data) {
-      return {
-        content: Buffer.from(data.content, "base64").toString(),
-        sha: data.sha,
+            // If it's a directory, recursively get its contents
+            if (item.type === "dir") {
+              await getFilesRecursively(item.path)
+            }
+          }
+        } catch (error) {
+          console.error(`Error getting contents of ${currentPath}:`, error)
+        }
       }
+
+      await getFilesRecursively(path)
+      return allFiles
+    } catch (error) {
+      console.error("Error getting all repository files:", error)
+      return []
     }
-    throw new Error("File not found")
   }
 
-  async createFile(owner: string, repo: string, path: string, content: string, message: string) {
-    const { data } = await this.octokit.repos.createOrUpdateFileContents({
-      owner,
-      repo,
-      path,
-      message,
-      content: Buffer.from(content).toString("base64"),
+  async getFileContent(owner: string, repo: string, path: string): Promise<{ content: string; sha: string }> {
+    const response = await this.request(`/repos/${owner}/${repo}/contents/${path}`)
+
+    if (response.type !== "file") {
+      throw new Error(`${path} is not a file`)
+    }
+
+    let content = ""
+    if (response.content) {
+      if (response.encoding === "base64") {
+        content = atob(response.content.replace(/\n/g, ""))
+      } else {
+        content = response.content
+      }
+    } else if (response.download_url) {
+      // For large files, GitHub provides a download URL
+      const fileResponse = await fetch(response.download_url)
+      content = await fileResponse.text()
+    }
+
+    return {
+      content,
+      sha: response.sha,
+    }
+  }
+
+  async createFile(owner: string, repo: string, path: string, content: string, message: string): Promise<any> {
+    return this.request(`/repos/${owner}/${repo}/contents/${path}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        message,
+        content: btoa(unescape(encodeURIComponent(content))),
+      }),
     })
-    return data
   }
 
-  async updateFile(owner: string, repo: string, path: string, content: string, message: string, sha: string) {
-    const { data } = await this.octokit.repos.createOrUpdateFileContents({
-      owner,
-      repo,
-      path,
-      message,
-      content: Buffer.from(content).toString("base64"),
-      sha,
+  async updateFile(
+    owner: string,
+    repo: string,
+    path: string,
+    content: string,
+    message: string,
+    sha: string,
+  ): Promise<any> {
+    return this.request(`/repos/${owner}/${repo}/contents/${path}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        message,
+        content: btoa(unescape(encodeURIComponent(content))),
+        sha,
+      }),
     })
-    return data
   }
 
-  async deleteFile(owner: string, repo: string, path: string, message: string, sha: string) {
-    const { data } = await this.octokit.repos.deleteFile({
-      owner,
-      repo,
-      path,
-      message,
-      sha,
+  async deleteFile(owner: string, repo: string, path: string, message: string, sha: string): Promise<any> {
+    return this.request(`/repos/${owner}/${repo}/contents/${path}`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        message,
+        sha,
+      }),
     })
-    return data
   }
 
-  async listFiles(owner: string, repo: string, path = "") {
-    const { data } = await this.octokit.repos.getContent({ owner, repo, path })
-    return Array.isArray(data) ? data : [data]
+  async getUser(): Promise<any> {
+    return this.request("/user")
+  }
+
+  async getUserRepositories(): Promise<any[]> {
+    return this.request("/user/repos?sort=updated&per_page=100")
   }
 }

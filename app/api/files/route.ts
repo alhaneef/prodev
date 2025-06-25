@@ -1,7 +1,60 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getUserFromSession } from "@/lib/auth"
-import { GitHubService } from "@/lib/github"
+import { GitHubService } from "@/lib/github-service"
 import { GitHubStorageService } from "@/lib/github-storage"
+
+interface FileTreeNode {
+  name: string
+  path: string
+  type: "file" | "directory"
+  size?: number
+  children?: FileTreeNode[]
+  lastModified?: string
+}
+
+function buildFileTree(files: any[]): FileTreeNode[] {
+  const tree: FileTreeNode[] = []
+  const pathMap = new Map<string, FileTreeNode>()
+
+  // Sort files by path to ensure proper tree building
+  files.sort((a, b) => a.path.localeCompare(b.path))
+
+  for (const file of files) {
+    const pathParts = file.path.split("/").filter(Boolean)
+    let currentPath = ""
+    let currentLevel = tree
+
+    for (let i = 0; i < pathParts.length; i++) {
+      const part = pathParts[i]
+      currentPath = currentPath ? `${currentPath}/${part}` : part
+
+      let node = pathMap.get(currentPath)
+
+      if (!node) {
+        const isLastPart = i === pathParts.length - 1
+        const isFile = isLastPart && file.type === "file"
+
+        node = {
+          name: part,
+          path: currentPath,
+          type: isFile ? "file" : "directory",
+          size: file.size,
+          lastModified: file.lastModified || new Date().toISOString(),
+          children: isFile ? undefined : [],
+        }
+
+        pathMap.set(currentPath, node)
+        currentLevel.push(node)
+      }
+
+      if (node.children) {
+        currentLevel = node.children
+      }
+    }
+  }
+
+  return tree
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -36,38 +89,30 @@ export async function GET(request: NextRequest) {
           path: filePath,
         })
       } else {
-        // Get all files
+        // Get ALL files recursively
+        console.log(`Loading all files for project ${projectId}...`)
         const allFiles = await githubStorage.getAllFiles()
+        console.log(`Found ${allFiles.length} total files`)
 
-        // Process files to include content if requested
-        const processedFiles = await Promise.all(
-          allFiles.map(async (file) => {
-            const processedFile = {
-              name: file.name,
-              path: file.path,
-              type: file.type,
-              size: file.size,
-              lastModified: new Date().toISOString(),
-            }
+        // Build file tree structure
+        const fileTree = buildFileTree(allFiles)
 
-            if (includeContent && file.type === "file") {
-              try {
-                const content = await githubStorage.getFileContent(file.path)
-                return { ...processedFile, content }
-              } catch (error) {
-                console.error(`Error getting content for ${file.path}:`, error)
-                return processedFile
-              }
-            }
-
-            return processedFile
-          }),
-        )
+        // If includeContent is true, load content for text files
+        const processedFiles = allFiles.map((file) => ({
+          name: file.name,
+          path: file.path,
+          type: file.type,
+          size: file.size,
+          lastModified: new Date().toISOString(),
+        }))
 
         return NextResponse.json({
           success: true,
           files: processedFiles,
-          total: processedFiles.length,
+          fileTree,
+          total: allFiles.length,
+          directories: allFiles.filter((f) => f.type === "dir").length,
+          regularFiles: allFiles.filter((f) => f.type === "file").length,
         })
       }
     } catch (error) {
@@ -75,7 +120,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({
         success: true,
         files: [],
+        fileTree: [],
         total: 0,
+        error: error instanceof Error ? error.message : "Unknown error",
       })
     }
   } catch (error) {
@@ -107,19 +154,16 @@ export async function POST(request: NextRequest) {
 
     switch (action) {
       case "save":
-        if (!filePath || content === undefined) {
-          return NextResponse.json({ error: "File path and content are required" }, { status: 400 })
-        }
-
-        await githubStorage.saveFileContent(filePath, content, `Update ${filePath}`)
-        return NextResponse.json({ success: true })
-
       case "create":
         if (!filePath || content === undefined) {
           return NextResponse.json({ error: "File path and content are required" }, { status: 400 })
         }
 
-        await githubStorage.saveFileContent(filePath, content, `Create ${filePath}`)
+        await githubStorage.saveFileContent(
+          filePath,
+          content,
+          `${action === "create" ? "Create" : "Update"} ${filePath}`,
+        )
         return NextResponse.json({ success: true })
 
       case "delete":
@@ -148,7 +192,11 @@ export async function POST(request: NextRequest) {
             results.push({ path: file.path, success: true })
           } catch (error) {
             console.error(`Error updating file ${file.path}:`, error)
-            results.push({ path: file.path, success: false, error: error.message })
+            results.push({
+              path: file.path,
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            })
           }
         }
 

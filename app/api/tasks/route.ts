@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getUserFromSession } from "@/lib/auth"
-import { GitHubService } from "@/lib/github"
+import { GitHubService } from "@/lib/github-service"
 import { GitHubStorageService } from "@/lib/github-storage"
 import { AIAgent } from "@/lib/ai-agent"
 
@@ -26,7 +26,10 @@ export async function GET(request: NextRequest) {
     const githubStorage = new GitHubStorageService(github, user.username, `prodev-${projectId}`)
 
     try {
+      console.log(`Loading tasks for project ${projectId}...`)
       const tasks = await githubStorage.getTasks()
+      console.log(`Found ${tasks.length} tasks`)
+
       return NextResponse.json({
         success: true,
         tasks: tasks || [],
@@ -38,6 +41,7 @@ export async function GET(request: NextRequest) {
         success: true,
         tasks: [],
         count: 0,
+        error: error instanceof Error ? error.message : "Unknown error",
       })
     }
   } catch (error) {
@@ -67,6 +71,8 @@ export async function POST(request: NextRequest) {
     const github = new GitHubService(process.env.GITHUB_TOKEN)
     const githubStorage = new GitHubStorageService(github, user.username, `prodev-${projectId}`)
 
+    console.log(`Tasks API: ${action} for project ${projectId}`)
+
     switch (action) {
       case "create":
         if (!taskData) {
@@ -83,6 +89,8 @@ export async function POST(request: NextRequest) {
         }
 
         await githubStorage.createTask(newTask)
+        console.log(`Created task: ${newTask.id}`)
+
         return NextResponse.json({ success: true, task: newTask })
 
       case "generate_ai_tasks":
@@ -90,9 +98,10 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: "AI service not configured" }, { status: 500 })
         }
 
+        console.log("Generating AI tasks...")
         const aiAgent = new AIAgent(process.env.GOOGLE_AI_API_KEY, githubStorage, github)
 
-        // Get project metadata
+        // Get or create project metadata
         let metadata = await githubStorage.getProjectMetadata()
         if (!metadata) {
           metadata = {
@@ -108,6 +117,7 @@ export async function POST(request: NextRequest) {
         }
 
         const generatedTasks = await aiAgent.generateTasks(metadata.description, metadata.framework, context)
+        console.log(`Generated ${generatedTasks.length} tasks`)
 
         // Save all generated tasks
         for (const task of generatedTasks) {
@@ -128,6 +138,8 @@ export async function POST(request: NextRequest) {
         if (!process.env.GOOGLE_AI_API_KEY) {
           return NextResponse.json({ error: "AI service not configured" }, { status: 500 })
         }
+
+        console.log(`Implementing task: ${taskId}`)
 
         const tasks = await githubStorage.getTasks()
         const task = tasks?.find((t) => t.id === taskId)
@@ -155,6 +167,7 @@ export async function POST(request: NextRequest) {
 
           // Mark as completed
           await githubStorage.updateTask(taskId, { status: "completed" })
+          console.log(`Task ${taskId} implemented successfully`)
 
           return NextResponse.json({
             success: true,
@@ -167,13 +180,21 @@ export async function POST(request: NextRequest) {
           // Mark as failed
           await githubStorage.updateTask(taskId, { status: "failed" })
 
-          return NextResponse.json({ error: "Failed to implement task" }, { status: 500 })
+          return NextResponse.json(
+            {
+              error: "Failed to implement task",
+              details: error instanceof Error ? error.message : "Unknown error",
+            },
+            { status: 500 },
+          )
         }
 
       case "implement_all":
         if (!process.env.GOOGLE_AI_API_KEY) {
           return NextResponse.json({ error: "AI service not configured" }, { status: 500 })
         }
+
+        console.log("Implementing all pending tasks...")
 
         const allTasks = await githubStorage.getTasks()
         const pendingTasks = allTasks?.filter((t) => t.status === "pending") || []
@@ -185,6 +206,8 @@ export async function POST(request: NextRequest) {
             message: "No pending tasks to implement",
           })
         }
+
+        console.log(`Found ${pendingTasks.length} pending tasks`)
 
         const aiAgentAll = new AIAgent(process.env.GOOGLE_AI_API_KEY, githubStorage, github)
         const metadataAll = await githubStorage.getProjectMetadata()
@@ -203,6 +226,7 @@ export async function POST(request: NextRequest) {
         for (const task of pendingTasks.slice(0, 5)) {
           // Limit to 5 tasks at once
           try {
+            console.log(`Implementing task: ${task.id} - ${task.title}`)
             await githubStorage.updateTask(task.id, { status: "in-progress" })
 
             const implementation = await aiAgentAll.implementTask(task, projectContextAll)
@@ -229,6 +253,10 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        console.log(
+          `Implementation complete: ${results.filter((r) => r.status === "completed").length} succeeded, ${results.filter((r) => r.status === "failed").length} failed`,
+        )
+
         return NextResponse.json({
           success: true,
           results,
@@ -242,6 +270,8 @@ export async function POST(request: NextRequest) {
         }
 
         await githubStorage.deleteTask(taskId)
+        console.log(`Deleted task: ${taskId}`)
+
         return NextResponse.json({ success: true })
 
       case "update_files":
@@ -275,6 +305,12 @@ export async function POST(request: NextRequest) {
     }
   } catch (error) {
     console.error("Error in tasks POST API:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: "Internal server error",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 },
+    )
   }
 }

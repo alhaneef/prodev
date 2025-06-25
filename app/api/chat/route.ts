@@ -1,18 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { db } from "@/lib/database"
-import { GitHubService } from "@/lib/github"
+import { getUserFromSession } from "@/lib/auth"
+import { GitHubService } from "@/lib/github-service"
 import { GitHubStorageService } from "@/lib/github-storage"
 import { AIAgent } from "@/lib/ai-agent"
-
-function getUserFromSession(request: NextRequest) {
-  try {
-    const sessionCookie = request.cookies.get("user-session")?.value
-    if (!sessionCookie) return null
-    return JSON.parse(sessionCookie)
-  } catch {
-    return null
-  }
-}
+import { db } from "@/lib/db" // Declare the db variable
 
 export async function GET(request: NextRequest) {
   try {
@@ -62,77 +53,111 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = getUserFromSession(request)
+    const user = await getUserFromSession(request)
     if (!user) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const { projectId, action, message, conversationHistory, replyTo } = await request.json()
+    const body = await request.json()
+    const { projectId, message, conversationHistory } = body
 
-    if (!projectId) {
-      return NextResponse.json({ success: false, error: "Project ID required" })
+    if (!projectId || !message) {
+      return NextResponse.json({ error: "Project ID and message are required" }, { status: 400 })
     }
 
-    // Get project and verify ownership
-    const project = await db.getProject(projectId)
-    if (!project || project.user_id !== user.id) {
-      return NextResponse.json({ success: false, error: "Project not found" })
+    if (!process.env.GITHUB_TOKEN) {
+      return NextResponse.json({ error: "GitHub token not configured" }, { status: 500 })
     }
 
-    const credentials = await db.getCredentials(user.id)
-    if (!credentials?.github_token) {
-      return NextResponse.json({ success: false, error: "GitHub credentials required" })
+    if (!process.env.GOOGLE_AI_API_KEY) {
+      return NextResponse.json({ error: "AI service not configured" }, { status: 500 })
     }
 
-    if (!credentials.gemini_api_key) {
-      return NextResponse.json({ success: false, error: "Gemini API key required" })
-    }
+    const github = new GitHubService(process.env.GITHUB_TOKEN)
+    const githubStorage = new GitHubStorageService(github, user.username, `prodev-${projectId}`)
+    const aiAgent = new AIAgent(process.env.GOOGLE_AI_API_KEY, githubStorage, github)
 
-    const github = new GitHubService(credentials.github_token)
-    const [owner, repo] = project.repository.split("/").slice(-2)
-    const githubStorage = new GitHubStorageService(github, owner, repo)
-
-    const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
-
-    try {
-      switch (action) {
-        case "chat":
-          const response = await aiAgent.chatResponse(message, project, conversationHistory || [])
-          return NextResponse.json({ success: true, response })
-
-        case "autonomous_followup":
-          // Handle autonomous follow-up actions
-          const followUpResponse = await handleAutonomousFollowUp(
-            message,
-            conversationHistory,
-            aiAgent,
-            project,
-            githubStorage,
-            github,
-            credentials,
-          )
-          return NextResponse.json({
-            success: true,
-            response: followUpResponse.response,
-            needsMoreFollowUp: followUpResponse.needsMoreFollowUp,
-          })
-
-        default:
-          return NextResponse.json({ success: false, error: "Invalid action" })
+    // Get project context
+    let metadata = await githubStorage.getProjectMetadata()
+    if (!metadata) {
+      metadata = {
+        name: `Project ${projectId}`,
+        description: "A software project",
+        framework: "React",
+        progress: 0,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       }
-    } catch (error) {
-      console.error("Chat API error:", error)
-      return NextResponse.json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to process chat request",
-      })
+      await githubStorage.saveProjectMetadata(metadata)
     }
-  } catch (error) {
-    console.error("Chat API error:", error)
+
+    const projectContext = {
+      id: projectId,
+      name: metadata.name,
+      description: metadata.description,
+      framework: metadata.framework,
+      repository: `${user.username}/prodev-${projectId}`,
+      progress: metadata.progress,
+    }
+
+    // Generate AI response
+    const response = await aiAgent.chatResponse(message, projectContext, conversationHistory || [])
+
+    // Save conversation to memory
+    try {
+      const memory = await githubStorage.getAgentMemory()
+      const updatedHistory = [
+        ...(memory?.conversationHistory || []),
+        {
+          role: "user",
+          content: message,
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: "assistant",
+          content: response,
+          timestamp: new Date().toISOString(),
+        },
+      ].slice(-50) // Keep last 50 messages
+
+      const updatedMemory = {
+        projectId,
+        conversationHistory: updatedHistory,
+        taskHistory: memory?.taskHistory || [],
+        codeContext: memory?.codeContext || [],
+        learnings: memory?.learnings || {},
+        currentFocus: "Development",
+        lastUpdate: new Date().toISOString(),
+        fileCache: memory?.fileCache || {},
+        codebaseIndex: memory?.codebaseIndex || {},
+        userPreferences: memory?.userPreferences || {},
+        projectInsights: memory?.projectInsights || {},
+      }
+
+      await githubStorage.saveAgentMemory(updatedMemory)
+    } catch (error) {
+      console.error("Error saving conversation memory:", error)
+    }
+
     return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to process request",
+      success: true,
+      response,
+      metadata: {
+        hasActions: response.includes("implement") || response.includes("create"),
+        executedCommands: (response.match(/```bash/g) || []).length,
+        filesModified: (response.match(/```[a-z]+\s+file=/g) || []).length,
+      },
     })
+  } catch (error) {
+    console.error("Error in chat API:", error)
+    return NextResponse.json(
+      {
+        error: "Internal server error",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 },
+    )
   }
 }
 
@@ -146,7 +171,7 @@ async function handleAutonomousFollowUp(
   credentials: any,
 ): Promise<{ response: string; needsMoreFollowUp: boolean }> {
   // Get the last agent message to understand what it planned to do
-  const lastAgentMessage = conversationHistory.filter((msg) => msg.role === "agent").pop()?.content || ""
+  const lastAgentMessage = conversationHistory.filter((msg) => msg.role === "assistant").pop()?.content || ""
 
   let response = ""
   let needsMoreFollowUp = false
