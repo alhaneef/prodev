@@ -119,9 +119,94 @@ export function FloatingChat({ projectId, projectName, onUpdate }: FloatingChatP
     }
   }
 
+  // Add a function to create tasks via chat
+  const handleCreateTaskFromChat = async (taskTitle: string, taskDescription: string): Promise<string> => {
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "create",
+          taskData: {
+            title: taskTitle,
+            description: taskDescription,
+            priority: "high",
+            estimatedTime: "3 hours",
+            files: [
+              "src/services/prayerTimeService.ts",
+              "src/hooks/usePrayerTimes.ts",
+              "src/components/PrayerTimeCard.tsx",
+              "src/components/PrayerTimeDisplay.tsx",
+            ],
+          },
+        }),
+      })
+
+      const data = await response.json()
+      if (data.success) {
+        onUpdate?.("task_created", "task_created")
+        return `✅ Created task: "${taskTitle}"`
+      } else {
+        return `❌ Failed to create task: ${data.error}`
+      }
+    } catch (error) {
+      return `❌ Error creating task: ${error instanceof Error ? error.message : "Unknown error"}`
+    }
+  }
+
+  // Update the handleRealTaskImplementation function to detect task creation requests
   const handleRealTaskImplementation = async (message: string): Promise<string> => {
     const lowerMessage = message.toLowerCase()
 
+    // Check for task creation requests
+    if (lowerMessage.includes("create") && lowerMessage.includes("task") && lowerMessage.includes("aladhan")) {
+      const taskTitle = "Update app to use Aladhan.com API instead of IslamicFinder"
+      const taskDescription =
+        "Replace the current IslamicFinder API integration with Aladhan.com API for fetching prayer times. Update all necessary components including prayerTimeService.ts, usePrayerTimes hook, and related UI components to work with the new API structure and response format."
+
+      const createResult = await handleCreateTaskFromChat(taskTitle, taskDescription)
+
+      // Now implement the task
+      try {
+        const tasksResponse = await fetch(`/api/tasks?projectId=${projectId}`, {
+          credentials: "include",
+        })
+
+        if (tasksResponse.ok) {
+          const tasksData = await tasksResponse.json()
+          const newTask = tasksData.tasks?.find((t: any) => t.title.includes("Aladhan"))
+
+          if (newTask) {
+            setAgentStatus("working")
+
+            const implementResponse = await fetch("/api/tasks", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({
+                projectId,
+                action: "implement",
+                taskId: newTask.id,
+              }),
+            })
+
+            const implementData = await implementResponse.json()
+
+            if (implementData.success) {
+              return `${createResult}\n\n✅ Successfully implemented the Aladhan API update!\n\n📁 Files modified: ${implementData.filesModified}\n💬 ${implementData.implementation?.message || "Implementation completed"}`
+            } else {
+              return `${createResult}\n\n❌ Failed to implement: ${implementData.error}`
+            }
+          }
+        }
+      } catch (error) {
+        return `${createResult}\n\n❌ Implementation error: ${error instanceof Error ? error.message : "Unknown error"}`
+      }
+    }
+
+    // Rest of the existing implementation logic...
     if (lowerMessage.includes("implement all") || lowerMessage.includes("implement the tasks")) {
       setAgentStatus("working")
 

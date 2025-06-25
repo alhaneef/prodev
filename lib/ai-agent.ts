@@ -42,18 +42,37 @@ export interface AgentFeedback {
   taskId?: string
 }
 
+export interface CodebaseIndex {
+  files: Record<
+    string,
+    {
+      content: string
+      language: string
+      imports: string[]
+      exports: string[]
+      functions: string[]
+      classes: string[]
+      lastModified: string
+    }
+  >
+  dependencies: Record<string, string[]>
+  structure: any
+}
+
 export class AIAgent {
   private genAI: GoogleGenerativeAI
   private model: any
   private githubStorage?: GitHubStorageService
   private github?: GitHubService
   private feedbackCallback?: (feedback: AgentFeedback) => void
+  private codebaseIndex: CodebaseIndex = { files: {}, dependencies: {}, structure: {} }
 
   constructor(apiKey: string, githubStorage?: GitHubStorageService, github?: GitHubService) {
     this.genAI = new GoogleGenerativeAI(apiKey)
     this.model = this.genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" })
     this.githubStorage = githubStorage
     this.github = github
+    this.initializeCodebaseIndex()
   }
 
   setFeedbackCallback(callback: (feedback: AgentFeedback) => void) {
@@ -66,43 +85,250 @@ export class AIAgent {
     }
   }
 
-  async searchWeb(query: string): Promise<string> {
+  private async initializeCodebaseIndex() {
+    if (!this.githubStorage) return
+
     try {
-      // Using DuckDuckGo Instant Answer API (free)
-      const response = await fetch(
-        `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
-      )
+      const memory = await this.githubStorage.getAgentMemory()
+      if (memory?.fileCache) {
+        for (const [path, data] of Object.entries(memory.fileCache)) {
+          this.indexFile(path, data.content)
+        }
+      }
+    } catch (error) {
+      console.error("Error initializing codebase index:", error)
+    }
+  }
+
+  private indexFile(path: string, content: string) {
+    const language = this.getLanguageFromPath(path)
+    const imports = this.extractImports(content, language)
+    const exports = this.extractExports(content, language)
+    const functions = this.extractFunctions(content, language)
+    const classes = this.extractClasses(content, language)
+
+    this.codebaseIndex.files[path] = {
+      content,
+      language,
+      imports,
+      exports,
+      functions,
+      classes,
+      lastModified: new Date().toISOString(),
+    }
+
+    // Update dependencies
+    this.codebaseIndex.dependencies[path] = imports
+  }
+
+  private getLanguageFromPath(path: string): string {
+    const ext = path.split(".").pop()?.toLowerCase()
+    const languageMap: Record<string, string> = {
+      ts: "typescript",
+      tsx: "typescript",
+      js: "javascript",
+      jsx: "javascript",
+      py: "python",
+      json: "json",
+      md: "markdown",
+      css: "css",
+      scss: "scss",
+      html: "html",
+    }
+    return languageMap[ext || ""] || "text"
+  }
+
+  private extractImports(content: string, language: string): string[] {
+    const imports: string[] = []
+
+    if (language === "typescript" || language === "javascript") {
+      const importRegex = /import\s+.*?\s+from\s+['"`]([^'"`]+)['"`]/g
+      const requireRegex = /require$$['"`]([^'"`]+)['"`]$$/g
+
+      let match
+      while ((match = importRegex.exec(content)) !== null) {
+        imports.push(match[1])
+      }
+      while ((match = requireRegex.exec(content)) !== null) {
+        imports.push(match[1])
+      }
+    }
+
+    return imports
+  }
+
+  private extractExports(content: string, language: string): string[] {
+    const exports: string[] = []
+
+    if (language === "typescript" || language === "javascript") {
+      const exportRegex = /export\s+(?:default\s+)?(?:function|class|const|let|var)\s+(\w+)/g
+      let match
+      while ((match = exportRegex.exec(content)) !== null) {
+        exports.push(match[1])
+      }
+    }
+
+    return exports
+  }
+
+  private extractFunctions(content: string, language: string): string[] {
+    const functions: string[] = []
+
+    if (language === "typescript" || language === "javascript") {
+      const functionRegex = /(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s+)?$$|(\w+)\s*:\s*\([^)]*$$\s*=>)/g
+      let match
+      while ((match = functionRegex.exec(content)) !== null) {
+        const funcName = match[1] || match[2] || match[3]
+        if (funcName) functions.push(funcName)
+      }
+    }
+
+    return functions
+  }
+
+  private extractClasses(content: string, language: string): string[] {
+    const classes: string[] = []
+
+    if (language === "typescript" || language === "javascript") {
+      const classRegex = /class\s+(\w+)/g
+      let match
+      while ((match = classRegex.exec(content)) !== null) {
+        classes.push(match[1])
+      }
+    }
+
+    return classes
+  }
+
+  async searchWeb(query: string): Promise<string> {
+    const searchAPIs = [
+      // DuckDuckGo Instant Answer API
+      async () => {
+        try {
+          const response = await fetch(
+            `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
+          )
+          const data = await response.json()
+
+          let searchResults = ""
+          if (data.AbstractText) {
+            searchResults += `Abstract: ${data.AbstractText}\n`
+          }
+          if (data.RelatedTopics && data.RelatedTopics.length > 0) {
+            searchResults += "\nRelated Information:\n"
+            data.RelatedTopics.slice(0, 3).forEach((topic: any, index: number) => {
+              if (topic.Text) {
+                searchResults += `${index + 1}. ${topic.Text}\n`
+              }
+            })
+          }
+          if (data.Answer) {
+            searchResults += `\nDirect Answer: ${data.Answer}\n`
+          }
+          return searchResults || null
+        } catch (error) {
+          return null
+        }
+      },
+
+      // Brave Search API (free tier)
+      async () => {
+        try {
+          const response = await fetch(
+            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=3`,
+            {
+              headers: {
+                "X-Subscription-Token": process.env.BRAVE_SEARCH_API_KEY || "demo-key",
+              },
+            },
+          )
+          if (!response.ok) return null
+
+          const data = await response.json()
+          let searchResults = ""
+
+          if (data.web?.results) {
+            searchResults += "Search Results:\n"
+            data.web.results.slice(0, 3).forEach((result: any, index: number) => {
+              searchResults += `${index + 1}. ${result.title}\n${result.description}\nURL: ${result.url}\n\n`
+            })
+          }
+
+          return searchResults || null
+        } catch (error) {
+          return null
+        }
+      },
+
+      // SerpAPI (free tier)
+      async () => {
+        try {
+          const response = await fetch(
+            `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY || "demo"}&num=3`,
+          )
+          if (!response.ok) return null
+
+          const data = await response.json()
+          let searchResults = ""
+
+          if (data.organic_results) {
+            searchResults += "Search Results:\n"
+            data.organic_results.slice(0, 3).forEach((result: any, index: number) => {
+              searchResults += `${index + 1}. ${result.title}\n${result.snippet}\nURL: ${result.link}\n\n`
+            })
+          }
+
+          return searchResults || null
+        } catch (error) {
+          return null
+        }
+      },
+    ]
+
+    // Try each search API until one works
+    for (const searchAPI of searchAPIs) {
+      try {
+        const result = await searchAPI()
+        if (result) {
+          return result
+        }
+      } catch (error) {
+        console.error("Search API error:", error)
+        continue
+      }
+    }
+
+    return "Web search temporarily unavailable."
+  }
+
+  async scrapeWebsite(url: string): Promise<string> {
+    try {
+      // Use a free web scraping service or implement basic scraping
+      const response = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`)
       const data = await response.json()
 
-      let searchResults = ""
+      if (data.contents) {
+        // Basic HTML parsing to extract text content
+        const textContent = data.contents
+          .replace(/<script[^>]*>.*?<\/script>/gi, "")
+          .replace(/<style[^>]*>.*?<\/style>/gi, "")
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
 
-      if (data.AbstractText) {
-        searchResults += `Abstract: ${data.AbstractText}\n`
+        return textContent.slice(0, 2000) // Limit to 2000 characters
       }
 
-      if (data.RelatedTopics && data.RelatedTopics.length > 0) {
-        searchResults += "\nRelated Information:\n"
-        data.RelatedTopics.slice(0, 3).forEach((topic: any, index: number) => {
-          if (topic.Text) {
-            searchResults += `${index + 1}. ${topic.Text}\n`
-          }
-        })
-      }
-
-      if (data.Answer) {
-        searchResults += `\nDirect Answer: ${data.Answer}\n`
-      }
-
-      return searchResults || "No relevant information found."
+      return "Could not scrape website content"
     } catch (error) {
-      console.error("Web search error:", error)
-      return "Web search temporarily unavailable."
+      console.error("Web scraping error:", error)
+      return "Web scraping failed"
     }
   }
 
   async executeToolCall(toolCall: string, context: any): Promise<string> {
     try {
-      // Parse the tool call
+      // Enhanced tool execution with more capabilities
       if (toolCall.includes("web_search.search")) {
         const queryMatch = toolCall.match(/queries=\["([^"]+)"\]/)
         if (queryMatch) {
@@ -111,8 +337,32 @@ export class AIAgent {
         }
       }
 
+      if (toolCall.includes("scrape_website")) {
+        const urlMatch = toolCall.match(/url=["']([^"']+)["']/)
+        if (urlMatch) {
+          const url = urlMatch[1]
+          return await this.scrapeWebsite(url)
+        }
+      }
+
+      if (toolCall.includes("analyze_codebase")) {
+        const pathMatch = toolCall.match(/path=["']([^"']+)["']/)
+        if (pathMatch) {
+          const path = pathMatch[1]
+          const fileInfo = this.codebaseIndex.files[path]
+          if (fileInfo) {
+            return `File Analysis for ${path}:
+Language: ${fileInfo.language}
+Functions: ${fileInfo.functions.join(", ")}
+Classes: ${fileInfo.classes.join(", ")}
+Imports: ${fileInfo.imports.join(", ")}
+Exports: ${fileInfo.exports.join(", ")}
+Last Modified: ${fileInfo.lastModified}`
+          }
+        }
+      }
+
       if (toolCall.includes('files["package.json"]')) {
-        // Get package.json content from GitHub storage
         if (this.githubStorage) {
           try {
             const content = await this.githubStorage.getFileContent("package.json")
@@ -125,7 +375,6 @@ export class AIAgent {
       }
 
       if (toolCall.includes("JSON.parse")) {
-        // Validate JSON content
         const jsonMatch = toolCall.match(/JSON\.parse$$([^)]+)$$/)
         if (jsonMatch && this.githubStorage) {
           try {
@@ -178,6 +427,7 @@ export class AIAgent {
         codeFiles,
         projectStructure: Object.keys(fileCache),
         recentActivity: memory?.conversationHistory?.slice(-10) || [],
+        codebaseIndex: this.codebaseIndex,
       }
     } catch (error) {
       console.error("Error getting project context:", error)
@@ -201,13 +451,16 @@ export class AIAgent {
         timestamp: new Date().toISOString(),
       })
 
-      // Apply each file change
+      // Apply each file change and update codebase index
       for (const file of files) {
         try {
           if (file.operation === "create" || file.operation === "update") {
             await this.githubStorage.updateFileContent(file.path, file.content, commitMessage)
+            // Update codebase index
+            this.indexFile(file.path, file.content)
           } else if (file.operation === "delete") {
             // Handle file deletion if needed
+            delete this.codebaseIndex.files[file.path]
             console.log(`Delete operation for ${file.path} - implement if needed`)
           }
         } catch (fileError) {
@@ -248,49 +501,92 @@ export class AIAgent {
       timestamp: new Date().toISOString(),
     })
 
-    // Get full context including cached files
+    // Get full context including cached files and codebase index
     const fullContext = await this.getProjectContext()
 
+    // Enhanced prompt with better context and intelligence
     const prompt = `
-    You are an expert ${projectContext.framework} developer implementing a specific task.
+    You are an expert ${projectContext.framework} developer with deep understanding of the codebase.
     
-    Task to Implement: ${task.title}
-    Description: ${task.description}
-    Priority: ${task.priority}
-    Framework: ${projectContext.framework}
-    Associated Files: ${task.files?.join(", ") || "None specified"}
+    TASK TO IMPLEMENT: ${task.title}
+    DESCRIPTION: ${task.description}
+    PRIORITY: ${task.priority}
+    FRAMEWORK: ${projectContext.framework}
+    ASSOCIATED FILES: ${task.files?.join(", ") || "Auto-detect from context"}
     
-    Project Context:
+    PROJECT CONTEXT:
     - Name: ${projectContext.name}
     - Description: ${projectContext.description}
     - Repository: ${projectContext.repository}
+    - Current Progress: ${projectContext.progress || 0}%
     
-    CRITICAL INSTRUCTIONS:
-    1. You MUST return ONLY valid JSON in this exact format
-    2. Do NOT include any markdown, explanations, or extra text
-    3. Ensure all JSON strings are properly escaped
-    4. Test your JSON before returning it
+    CODEBASE INTELLIGENCE:
+    - Total Files: ${Object.keys(fullContext.codebaseIndex?.files || {}).length}
+    - Key Components: ${Object.values(fullContext.codebaseIndex?.files || {})
+      .filter((f) => f.language === "typescript" && f.exports.length > 0)
+      .map((f) => f.exports.join(", "))
+      .slice(0, 10)
+      .join(", ")}
     
-    Return this exact JSON structure:
+    RECENT CONTEXT:
+    - Recent Tasks: ${JSON.stringify(fullContext.tasks?.slice(-3) || [])}
+    - Recent Activity: ${JSON.stringify(fullContext.recentActivity?.slice(-3) || [])}
+    
+    CURRENT PROJECT FILES (for reference):
+    ${fullContext.codeFiles
+      ?.map(([path, data]: [string, any]) => `${path}:\n${data.content?.slice(0, 300)}...`)
+      .slice(0, 8)
+      .join("\n\n")}
+    
+    INTELLIGENT IMPLEMENTATION INSTRUCTIONS:
+    1. Analyze the task in context of the existing codebase
+    2. Identify all files that need to be modified based on dependencies
+    3. Ensure consistency with existing code patterns and architecture
+    4. Handle edge cases and error scenarios
+    5. Update related tests and documentation if applicable
+    6. Follow the project's coding standards and conventions
+    
+    SPECIAL INSTRUCTIONS FOR THIS TASK:
+    ${
+      task.title.toLowerCase().includes("aladhan")
+        ? `
+    - Replace IslamicFinder API with Aladhan.com API
+    - Update API endpoint to: https://api.aladhan.com/v1/timings
+    - Map response format: data.data.timings.{Fajr, Sunrise, Dhuhr, Asr, Maghrib, Isha}
+    - Ensure all prayer time components work with new data structure
+    - Add proper error handling for API failures
+    - Update any related hooks and services
+    `
+        : ""
+    }
+    
+    CRITICAL REQUIREMENTS:
+    1. Return ONLY valid JSON in this exact format
+    2. Include ALL necessary files for complete implementation
+    3. Ensure all code is production-ready and tested
+    4. Follow TypeScript best practices
+    5. Maintain backward compatibility where possible
+    
+    REQUIRED JSON FORMAT:
     {
       "files": [
         {
           "path": "relative/path/to/file.ext",
           "content": "complete file content with proper escaping",
-          "operation": "create"
+          "operation": "create|update|delete"
         }
       ],
-      "message": "Implementation summary",
-      "commitMessage": "feat: descriptive commit message"
+      "message": "Detailed implementation summary with what was changed and why",
+      "commitMessage": "feat: descriptive commit message following conventional commits"
     }
     
-    Generate a complete, functional implementation for this task.
+    Generate a complete, intelligent implementation that considers the full project context.
     `
 
     try {
       this.sendFeedback({
         type: "progress",
-        message: "Analyzing task and generating implementation",
+        message: "Analyzing codebase and generating intelligent implementation",
         taskId: task.id,
         timestamp: new Date().toISOString(),
       })
@@ -371,6 +667,9 @@ export class AIAgent {
                 implementation.commitMessage,
               )
             }
+
+            // Update codebase index
+            this.indexFile(file.path, file.content)
           } else if (file.operation === "delete") {
             try {
               const existingFile = await this.github.getFileContent(
@@ -385,6 +684,9 @@ export class AIAgent {
                 implementation.commitMessage,
                 existingFile.sha,
               )
+
+              // Remove from codebase index
+              delete this.codebaseIndex.files[file.path]
             } catch (error) {
               console.log(`File ${file.path} doesn't exist, skipping delete`)
             }
@@ -403,7 +705,7 @@ export class AIAgent {
         timestamp: new Date().toISOString(),
       })
 
-      // Update agent memory with new learnings
+      // Update agent memory with enhanced learnings
       if (this.githubStorage) {
         try {
           const currentMemory = await this.githubStorage.getAgentMemory()
@@ -420,11 +722,13 @@ export class AIAgent {
                 files: implementation.files.map((f: any) => f.path),
                 timestamp: new Date().toISOString(),
                 patterns: this.extractCodePatterns(implementation.files),
+                codebaseChanges: this.analyzeCodebaseChanges(implementation.files),
               },
             },
             currentFocus: task.title,
             lastUpdate: new Date().toISOString(),
             fileCache: currentMemory?.fileCache || {},
+            codebaseIndex: this.codebaseIndex,
           }
 
           await this.githubStorage.saveAgentMemory(updatedMemory)
@@ -453,19 +757,56 @@ export class AIAgent {
     }
   }
 
+  private analyzeCodebaseChanges(files: any[]): any {
+    const changes = {
+      newFiles: [],
+      modifiedFiles: [],
+      deletedFiles: [],
+      newDependencies: [],
+      affectedComponents: [],
+    }
+
+    files.forEach((file) => {
+      if (file.operation === "create") {
+        changes.newFiles.push(file.path)
+      } else if (file.operation === "update") {
+        changes.modifiedFiles.push(file.path)
+      } else if (file.operation === "delete") {
+        changes.deletedFiles.push(file.path)
+      }
+
+      // Analyze dependencies
+      if (file.content) {
+        const imports = this.extractImports(file.content, this.getLanguageFromPath(file.path))
+        imports.forEach((imp) => {
+          if (!changes.newDependencies.includes(imp)) {
+            changes.newDependencies.push(imp)
+          }
+        })
+      }
+    })
+
+    return changes
+  }
+
   private extractCodePatterns(files: any[]): any {
-    // Extract common patterns from implemented files for learning
+    // Enhanced pattern extraction with more intelligence
     const patterns = {
       imports: [],
       components: [],
       functions: [],
       styles: [],
+      apiCalls: [],
+      hooks: [],
+      types: [],
     }
 
     files.forEach((file) => {
       if (file.content) {
+        const language = this.getLanguageFromPath(file.path)
+
         // Extract import patterns
-        const imports = file.content.match(/import.*from.*['"`].*['"`]/g) || []
+        const imports = this.extractImports(file.content, language)
         patterns.imports.push(...imports)
 
         // Extract component patterns
@@ -473,8 +814,20 @@ export class AIAgent {
         patterns.components.push(...components)
 
         // Extract function patterns
-        const functions = file.content.match(/(?:async\s+)?function\s+\w+/g) || []
+        const functions = this.extractFunctions(file.content, language)
         patterns.functions.push(...functions)
+
+        // Extract API calls
+        const apiCalls = file.content.match(/fetch\(['"`]([^'"`]+)['"`]/g) || []
+        patterns.apiCalls.push(...apiCalls)
+
+        // Extract hooks
+        const hooks = file.content.match(/use\w+/g) || []
+        patterns.hooks.push(...hooks)
+
+        // Extract TypeScript types
+        const types = file.content.match(/(?:interface|type)\s+(\w+)/g) || []
+        patterns.types.push(...types)
       }
     })
 
@@ -484,7 +837,7 @@ export class AIAgent {
   async generateTasks(projectDescription: string, framework: string): Promise<Task[]> {
     this.sendFeedback({
       type: "status",
-      message: "Analyzing project requirements and generating tasks",
+      message: "Analyzing project requirements and generating intelligent tasks",
       timestamp: new Date().toISOString(),
     })
 
@@ -492,43 +845,62 @@ export class AIAgent {
     const fullContext = await this.getProjectContext()
 
     const prompt = `
-    As an expert software architect, analyze this project and generate a comprehensive list of development tasks:
+    As an expert software architect with deep understanding of ${framework} and modern development practices, analyze this project and generate intelligent, actionable tasks.
     
-    Project: ${projectDescription}
-    Framework: ${framework}
+    PROJECT ANALYSIS:
+    - Description: ${projectDescription}
+    - Framework: ${framework}
+    - Current State: ${fullContext.tasks?.length || 0} existing tasks
+    - Completed: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0} tasks
+    - Progress: ${fullContext.metadata?.progress || 0}%
     
-    Existing Context:
-    - Current Focus: ${fullContext.memory?.currentFocus || "Initial setup"}
-    - Completed Tasks: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0}
-    - Total Tasks: ${fullContext.tasks?.length || 0}
-    - Project Progress: ${fullContext.metadata?.progress || 0}%
+    CODEBASE CONTEXT:
+    - Existing Files: ${Object.keys(fullContext.codebaseIndex?.files || {}).length}
+    - Key Components: ${Object.values(fullContext.codebaseIndex?.files || {})
+      .filter((f) => f.language === "typescript")
+      .map((f) => f.exports.join(", "))
+      .slice(0, 5)
+      .join(", ")}
     
-    Generate 8-15 specific, actionable tasks that cover:
-    1. Project setup and configuration
-    2. Core functionality implementation
-    3. UI/UX development
-    4. Database integration (if needed)
-    5. Authentication and security (if needed)
-    6. API development (if needed)
-    7. Testing and optimization
-    8. Deployment preparation
-    9. Documentation
-    10. Error handling and validation
+    INTELLIGENT TASK GENERATION REQUIREMENTS:
+    1. Analyze existing codebase to avoid duplicate work
+    2. Generate tasks that build upon existing functionality
+    3. Consider dependencies between tasks
+    4. Include specific file paths and technical details
+    5. Prioritize based on project needs and complexity
+    6. Include acceptance criteria for each task
+    
+    TASK CATEGORIES TO COVER:
+    1. Core Functionality & Business Logic
+    2. User Interface & User Experience
+    3. API Integration & Data Management
+    4. Testing & Quality Assurance
+    5. Performance & Optimization
+    6. Security & Error Handling
+    7. Documentation & Deployment
+    8. Accessibility & Internationalization
     
     CRITICAL: Return ONLY valid JSON in this exact format:
     {
       "tasks": [
         {
-          "title": "string",
-          "description": "string",
+          "title": "Specific, actionable task title",
+          "description": "Detailed description with technical requirements and context",
           "priority": "high|medium|low",
           "estimatedTime": "X hours",
-          "dependencies": [],
-          "files": ["path/to/file.ext"],
-          "acceptanceCriteria": ["criteria1", "criteria2"]
+          "dependencies": ["task_id_1", "task_id_2"],
+          "files": ["specific/file/paths.ts", "that/will/be/modified.tsx"],
+          "acceptanceCriteria": [
+            "Specific, measurable criteria",
+            "Technical requirements",
+            "User-facing outcomes"
+          ],
+          "technicalNotes": "Implementation hints, patterns to follow, or specific considerations"
         }
       ]
     }
+    
+    Generate 8-12 intelligent, well-structured tasks that will advance the project meaningfully.
     `
 
     try {
@@ -560,11 +932,12 @@ export class AIAgent {
           files: task.files || [],
           dependencies: task.dependencies || [],
           acceptanceCriteria: task.acceptanceCriteria || [],
+          technicalNotes: task.technicalNotes || "",
         }))
 
         this.sendFeedback({
           type: "completion",
-          message: `Generated ${tasks.length} development tasks`,
+          message: `Generated ${tasks.length} intelligent development tasks`,
           details: { taskCount: tasks.length },
           timestamp: new Date().toISOString(),
         })
@@ -584,8 +957,12 @@ export class AIAgent {
   }
 
   async chatResponse(message: string, projectContext: any, conversationHistory: any[]): Promise<string> {
+    // Enhanced intelligence for understanding user intent
+    const userIntent = this.analyzeUserIntent(message, conversationHistory)
+
     // Check if user is asking for web search
     const needsWebSearch =
+      userIntent.needsWebSearch ||
       message.toLowerCase().includes("search") ||
       message.toLowerCase().includes("look up") ||
       message.toLowerCase().includes("find information about") ||
@@ -603,65 +980,90 @@ export class AIAgent {
       webSearchResults = await this.searchWeb(message)
     }
 
-    // Get full context including cached files
+    // Get full context including cached files and codebase index
     const fullContext = await this.getProjectContext()
 
+    // Enhanced prompt with better intelligence and context awareness
     const prompt = `
-    You are an AI development agent with full project context, long-term memory, and web search capabilities.
+    You are an advanced AI development agent with deep project understanding, contextual memory, and intelligent reasoning capabilities.
     
-    Project: ${projectContext.name}
-    Framework: ${projectContext.framework}
-    Description: ${projectContext.description}
-    Current Status: ${projectContext.status}
-    Progress: ${projectContext.progress || 0}%
+    PROJECT INTELLIGENCE:
+    - Name: ${projectContext.name}
+    - Framework: ${projectContext.framework}
+    - Description: ${projectContext.description}
+    - Status: ${projectContext.status}
+    - Progress: ${projectContext.progress || 0}%
     
-    Agent Memory & Context:
+    CODEBASE INTELLIGENCE:
+    - Total Files: ${Object.keys(fullContext.codebaseIndex?.files || {}).length}
+    - Key Components: ${Object.values(fullContext.codebaseIndex?.files || {})
+      .filter((f) => f.language === "typescript" && f.exports.length > 0)
+      .map((f) => f.exports.join(", "))
+      .slice(0, 10)
+      .join(", ")}
+    - Recent Changes: ${fullContext.memory?.learnings ? Object.keys(fullContext.memory.learnings).slice(-3).join(", ") : "None"}
+    
+    CONTEXTUAL MEMORY:
     - Current Focus: ${fullContext.memory?.currentFocus || "Development"}
     - Recent Tasks: ${JSON.stringify(fullContext.tasks?.slice(-5) || [])}
-    - All Tasks: ${fullContext.tasks?.length || 0} total tasks
+    - Task Status: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0} completed, ${fullContext.tasks?.filter((t: any) => t.status === "pending").length || 0} pending
     - Key Learnings: ${JSON.stringify(fullContext.memory?.learnings || {})}
-    - Completed Tasks: ${fullContext.tasks?.filter((t: any) => t.status === "completed").length || 0}
-    - Project Files: ${fullContext.projectStructure?.length || 0} files
+    - Project Files: ${fullContext.projectStructure?.length || 0} files indexed
     
-    Current Project Files (for reference):
-    ${fullContext.codeFiles
-      ?.map(([path, data]: [string, any]) => `${path}: ${data.content?.slice(0, 200)}...`)
-      .slice(0, 10)
-      .join("\n")}
-    
-    ${webSearchResults ? `Web Search Results: ${webSearchResults}` : ""}
-    
-    Conversation History:
+    CONVERSATION CONTEXT:
     ${conversationHistory
       .slice(-10)
       .map((msg) => `${msg.role}: ${msg.content}`)
       .join("\n")}
     
-    User Message: ${message}
+    USER INTENT ANALYSIS:
+    - Intent Type: ${userIntent.type}
+    - Confidence: ${userIntent.confidence}
+    - Suggested Actions: ${userIntent.suggestedActions.join(", ")}
+    - Context Clues: ${userIntent.contextClues.join(", ")}
     
-    You can:
-    1. Answer questions about the project with full context and file access
-    2. Create, update, or manage tasks and sprints
-    3. Suggest improvements based on past learnings and current code
-    4. Implement features or fix issues with full code awareness
-    5. Search the web for information (automatically triggered when needed)
-    6. Provide specific, actionable advice based on actual project state
-    7. Reference previous work and conversations with full context
-    8. Analyze existing code and suggest improvements
-    9. Commit changes to GitHub automatically
-    10. Deploy projects and fix deployment issues
+    ${webSearchResults ? `WEB SEARCH RESULTS: ${webSearchResults}` : ""}
     
-    IMPORTANT: You have FULL ACCESS to all project files and context. Use this information to provide accurate, contextual responses. Never give generic or placeholder responses.
+    CURRENT USER MESSAGE: ${message}
     
-    If the user wants to create tasks, manage sprints, or implement features, 
-    provide specific instructions based on the actual project state and offer to execute them.
+    ADVANCED CAPABILITIES:
+    1. Deep codebase understanding with file indexing and dependency mapping
+    2. Contextual memory of all previous interactions and implementations
+    3. Intelligent task creation and management based on project needs
+    4. Real-time web search and information gathering
+    5. Website scraping for additional context
+    6. Autonomous code implementation with GitHub integration
+    7. Smart error detection and automatic fixing
+    8. Deployment automation with error recovery
+    9. Pattern recognition and learning from past implementations
+    10. Proactive suggestions based on project analysis
     
-    Be conversational but professional. Use your memory and context to provide valuable insights.
-    Always provide feedback on what you're doing and what the next steps are.
-    Reference actual files and code when relevant.
+    INTELLIGENT RESPONSE GUIDELINES:
+    1. Understand the user's true intent, not just literal words
+    2. Provide contextual responses based on project state and history
+    3. Suggest proactive actions that would benefit the project
+    4. Reference specific files, functions, and code patterns when relevant
+    5. Offer multiple approaches when appropriate
+    6. Anticipate follow-up questions and provide comprehensive answers
+    7. Use project-specific terminology and maintain consistency
+    8. Learn from previous interactions to improve responses
     
-    If you mention you will do something (like "I'll check", "I'll validate", "I'll fix", "I'll deploy"), 
-    you should actually execute those actions in your next response.
+    AUTONOMOUS ACTION TRIGGERS:
+    - If user mentions creating tasks, offer to create and implement them
+    - If user asks about code, analyze the actual codebase and provide specific insights
+    - If user mentions problems, proactively suggest solutions
+    - If user asks about deployment, check current status and offer assistance
+    - If user needs information, search the web and provide comprehensive answers
+    
+    RESPONSE REQUIREMENTS:
+    - Be conversational but professional and knowledgeable
+    - Provide specific, actionable advice based on actual project state
+    - Reference real files, functions, and code when relevant
+    - Offer to take autonomous actions when appropriate
+    - Show understanding of project context and history
+    - Anticipate needs and provide proactive suggestions
+    
+    Generate an intelligent, contextual response that demonstrates deep understanding of the project and user needs.
     `
 
     try {
@@ -669,7 +1071,7 @@ export class AIAgent {
       const response = await result.response
       const chatResponse = response.text()
 
-      // After generating the initial response, check for tool calls
+      // Enhanced tool call detection and execution
       if (chatResponse.includes("```tool_code")) {
         const toolCallMatch = chatResponse.match(/```tool_code\n(.*?)\n```/s)
         if (toolCallMatch) {
@@ -682,6 +1084,7 @@ export class AIAgent {
           Tool execution result: ${toolResult}
           
           Continue the conversation naturally, incorporating the tool results and proceeding with the next logical step.
+          Be specific about what was found and what actions should be taken next.
           `
 
           const followUpResult = await this.model.generateContent(followUpPrompt)
@@ -690,14 +1093,29 @@ export class AIAgent {
         }
       }
 
-      // Update conversation history in agent memory
+      // Update conversation history in agent memory with enhanced context
       if (this.githubStorage) {
         try {
           const currentMemory = await this.githubStorage.getAgentMemory()
           const updatedHistory = [
             ...(currentMemory?.conversationHistory || []),
-            { role: "user", content: message, timestamp: new Date().toISOString() },
-            { role: "agent", content: chatResponse, timestamp: new Date().toISOString() },
+            {
+              role: "user",
+              content: message,
+              timestamp: new Date().toISOString(),
+              intent: userIntent,
+            },
+            {
+              role: "agent",
+              content: chatResponse,
+              timestamp: new Date().toISOString(),
+              context: {
+                webSearchUsed: needsWebSearch,
+                codebaseReferenced:
+                  chatResponse.includes("src/") || chatResponse.includes(".ts") || chatResponse.includes(".tsx"),
+                actionsOffered: this.extractOfferedActions(chatResponse),
+              },
+            },
           ].slice(-50) // Keep last 50 messages
 
           const updatedMemory = {
@@ -706,6 +1124,12 @@ export class AIAgent {
             conversationHistory: updatedHistory,
             lastUpdate: new Date().toISOString(),
             fileCache: currentMemory?.fileCache || {},
+            codebaseIndex: this.codebaseIndex,
+            userPreferences: {
+              ...currentMemory?.userPreferences,
+              preferredResponseStyle: this.analyzeResponsePreferences(conversationHistory),
+              commonRequests: this.analyzeCommonRequests(conversationHistory),
+            },
           }
 
           await this.githubStorage.saveAgentMemory(updatedMemory)
@@ -724,5 +1148,135 @@ export class AIAgent {
       console.error("Error generating chat response:", error)
       throw error
     }
+  }
+
+  private analyzeUserIntent(message: string, conversationHistory: any[]): any {
+    const lowerMessage = message.toLowerCase()
+
+    // Intent classification
+    let intentType = "general"
+    let confidence = 0.5
+    const suggestedActions: string[] = []
+    const contextClues: string[] = []
+
+    // Task-related intents
+    if (lowerMessage.includes("create") && lowerMessage.includes("task")) {
+      intentType = "task_creation"
+      confidence = 0.9
+      suggestedActions.push("create_task", "implement_task")
+      contextClues.push("task_creation_request")
+    }
+
+    if (lowerMessage.includes("implement") || lowerMessage.includes("build") || lowerMessage.includes("develop")) {
+      intentType = "implementation"
+      confidence = 0.8
+      suggestedActions.push("implement_code", "analyze_requirements")
+      contextClues.push("implementation_request")
+    }
+
+    // Information seeking intents
+    if (lowerMessage.includes("how") || lowerMessage.includes("what") || lowerMessage.includes("explain")) {
+      intentType = "information_seeking"
+      confidence = 0.7
+      suggestedActions.push("web_search", "analyze_codebase")
+      contextClues.push("information_request")
+    }
+
+    // Problem-solving intents
+    if (
+      lowerMessage.includes("error") ||
+      lowerMessage.includes("bug") ||
+      lowerMessage.includes("fix") ||
+      lowerMessage.includes("problem")
+    ) {
+      intentType = "problem_solving"
+      confidence = 0.8
+      suggestedActions.push("analyze_error", "suggest_fix", "implement_fix")
+      contextClues.push("problem_report")
+    }
+
+    // Deployment intents
+    if (lowerMessage.includes("deploy") || lowerMessage.includes("deployment")) {
+      intentType = "deployment"
+      confidence = 0.9
+      suggestedActions.push("check_deployment_status", "deploy_project", "fix_deployment")
+      contextClues.push("deployment_request")
+    }
+
+    // API-related intents
+    if (lowerMessage.includes("api") || lowerMessage.includes("aladhan") || lowerMessage.includes("islamicfinder")) {
+      intentType = "api_integration"
+      confidence = 0.8
+      suggestedActions.push("update_api_integration", "test_api", "implement_api_changes")
+      contextClues.push("api_modification_request")
+    }
+
+    return {
+      type: intentType,
+      confidence,
+      suggestedActions,
+      contextClues,
+      needsWebSearch:
+        intentType === "information_seeking" || lowerMessage.includes("search") || lowerMessage.includes("look up"),
+    }
+  }
+
+  private extractOfferedActions(response: string): string[] {
+    const actions: string[] = []
+
+    if (response.includes("I'll") || response.includes("I can")) {
+      if (response.includes("implement")) actions.push("implementation")
+      if (response.includes("create")) actions.push("creation")
+      if (response.includes("fix")) actions.push("fixing")
+      if (response.includes("deploy")) actions.push("deployment")
+      if (response.includes("search")) actions.push("search")
+      if (response.includes("analyze")) actions.push("analysis")
+    }
+
+    return actions
+  }
+
+  private analyzeResponsePreferences(conversationHistory: any[]): any {
+    // Analyze user's preferred response style based on conversation history
+    const preferences = {
+      detailLevel: "medium", // low, medium, high
+      technicalDepth: "medium", // low, medium, high
+      actionOriented: true,
+      prefersExamples: false,
+    }
+
+    // Simple analysis based on conversation patterns
+    const userMessages = conversationHistory.filter((msg) => msg.role === "user")
+
+    if (userMessages.length > 0) {
+      const avgMessageLength = userMessages.reduce((sum, msg) => sum + msg.content.length, 0) / userMessages.length
+
+      if (avgMessageLength > 100) {
+        preferences.detailLevel = "high"
+        preferences.technicalDepth = "high"
+      } else if (avgMessageLength < 30) {
+        preferences.detailLevel = "low"
+        preferences.actionOriented = true
+      }
+    }
+
+    return preferences
+  }
+
+  private analyzeCommonRequests(conversationHistory: any[]): string[] {
+    const requests: string[] = []
+    const userMessages = conversationHistory.filter((msg) => msg.role === "user")
+
+    userMessages.forEach((msg) => {
+      const content = msg.content.toLowerCase()
+      if (content.includes("implement")) requests.push("implementation")
+      if (content.includes("create")) requests.push("creation")
+      if (content.includes("fix")) requests.push("fixing")
+      if (content.includes("deploy")) requests.push("deployment")
+      if (content.includes("explain")) requests.push("explanation")
+    })
+
+    // Return unique requests
+    return [...new Set(requests)]
   }
 }

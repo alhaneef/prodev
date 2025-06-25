@@ -112,6 +112,85 @@ export async function POST(request: NextRequest) {
           await githubStorage.createTask(newTask)
           return NextResponse.json({ success: true, task: newTask })
 
+        case "create_aladhan_task":
+          // Special case for creating the Aladhan API update task
+          const aladhanTask = {
+            id: `task_${Date.now()}`,
+            title: "Update app to use Aladhan.com API instead of IslamicFinder",
+            description:
+              "Replace the current IslamicFinder API integration with Aladhan.com API for fetching prayer times. Update all necessary components including prayerTimeService.ts, usePrayerTimes hook, and related UI components to work with the new API structure and response format. Ensure proper error handling and maintain backward compatibility where possible.",
+            status: "pending" as const,
+            priority: "high" as const,
+            type: "manual" as const,
+            estimatedTime: "3 hours",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            files: [
+              "src/services/prayerTimeService.ts",
+              "src/hooks/usePrayerTimes.ts",
+              "src/components/PrayerTimeCard.tsx",
+              "src/components/PrayerTimeDisplay.tsx",
+              "src/types/prayer.ts",
+            ],
+            dependencies: [],
+            acceptanceCriteria: [
+              "Prayer times are fetched from Aladhan.com API successfully",
+              "All existing UI components work with new data structure",
+              "Error handling is implemented for API failures",
+              "No breaking changes to existing functionality",
+              "API response is properly mapped to internal data structure",
+            ],
+            technicalNotes:
+              "Use https://api.aladhan.com/v1/timings endpoint with latitude/longitude parameters. Map response from data.data.timings.{Fajr, Sunrise, Dhuhr, Asr, Maghrib, Isha} format.",
+          }
+
+          await githubStorage.createTask(aladhanTask)
+
+          // Immediately implement the task if AI agent is available
+          if (credentials.gemini_api_key) {
+            try {
+              const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
+
+              // Mark as in-progress
+              await githubStorage.updateTask(aladhanTask.id, { status: "in-progress" })
+
+              const implementation = await aiAgent.implementTask(aladhanTask, project)
+
+              // Mark as completed
+              await githubStorage.updateTask(aladhanTask.id, {
+                status: "completed",
+                updatedAt: new Date().toISOString(),
+              })
+
+              return NextResponse.json({
+                success: true,
+                task: aladhanTask,
+                implementation,
+                message: `Aladhan API task created and implemented successfully`,
+                filesModified: implementation.files.length,
+              })
+            } catch (implementError) {
+              // Mark as failed but still return the created task
+              await githubStorage.updateTask(aladhanTask.id, {
+                status: "failed",
+                updatedAt: new Date().toISOString(),
+              })
+
+              return NextResponse.json({
+                success: true,
+                task: aladhanTask,
+                implementationError: implementError instanceof Error ? implementError.message : "Implementation failed",
+                message: "Task created but implementation failed",
+              })
+            }
+          }
+
+          return NextResponse.json({
+            success: true,
+            task: aladhanTask,
+            message: "Aladhan API task created successfully",
+          })
+
         case "create_subtask":
           if (!parentTaskId || !taskData?.title) {
             return NextResponse.json({ success: false, error: "Parent task ID and subtask title required" })
