@@ -7,52 +7,6 @@ import { db } from "@/lib/database" // Declare the db variable
 
 export async function GET(request: NextRequest) {
   try {
-    const user = getUserFromSession(request)
-    if (!user) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-    }
-
-    const { searchParams } = new URL(request.url)
-    const projectId = searchParams.get("projectId")
-
-    if (!projectId) {
-      return NextResponse.json({ success: false, error: "Project ID required" })
-    }
-
-    // Get project and verify ownership
-    const project = await db.getProject(projectId)
-    if (!project || project.user_id !== user.id) {
-      return NextResponse.json({ success: false, error: "Project not found" })
-    }
-
-    const credentials = await db.getCredentials(user.id)
-    if (!credentials?.github_token) {
-      return NextResponse.json({ success: false, error: "GitHub credentials required" })
-    }
-
-    // Get chat history from GitHub storage
-    const github = new GitHubService(credentials.github_token)
-    const [owner, repo] = project.repository.split("/").slice(-2)
-    const githubStorage = new GitHubStorageService(github, owner, repo)
-
-    try {
-      const memory = await githubStorage.getAgentMemory()
-      const messages = memory?.conversationHistory || []
-      return NextResponse.json({ success: true, messages })
-    } catch (error) {
-      return NextResponse.json({ success: true, messages: [] })
-    }
-  } catch (error) {
-    console.error("Chat GET API error:", error)
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to get chat history",
-    })
-  }
-}
-
-export async function GET(request: NextRequest) {
-  try {
     const user = await getUserFromSession(request)
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
