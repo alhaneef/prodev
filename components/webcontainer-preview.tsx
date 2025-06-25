@@ -50,6 +50,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
   const [isRunning, setIsRunning] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [files, setFiles] = useState<FileNode[]>([])
+  const [allFiles, setAllFiles] = useState<any[]>([])
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null)
   const [fileContent, setFileContent] = useState("")
   const [terminalOutput, setTerminalOutput] = useState<string[]>([])
@@ -220,7 +221,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     }
   }
 
-const loadProjectFiles = async () => {
+  const loadProjectFiles = async () => {
     setIsLoading(true)
     addTerminalOutput("📂 Loading project files...")
 
@@ -275,7 +276,6 @@ const loadProjectFiles = async () => {
     }
   }
 
-  
   const mountFilesToWebContainer = async (fileList: any[]) => {
     if (!useWebContainer) return
 
@@ -358,55 +358,55 @@ const loadProjectFiles = async () => {
   }
 
   const saveFileContent = async (filePath: string, content: string) => {
-  try {
-    addTerminalOutput(`💾 Saving ${filePath}...`)
+    try {
+      addTerminalOutput(`💾 Saving ${filePath}...`)
 
-    const response = await fetch("/api/files", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        projectId,
-        action: "save",
-        filePath,
-        content,
-      }),
-    })
+      const response = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "save",
+          filePath,
+          content,
+        }),
+      })
 
-    if (response.ok) {
-      const data = await response.json()
-      if (data.success) {
-        setHasUnsavedChanges(false)
-        addTerminalOutput(`✅ Saved ${filePath}`)
+      if (response.ok) {
+        const data = await response.json()
+        if (data.success) {
+          setHasUnsavedChanges(false)
+          addTerminalOutput(`✅ Saved ${filePath}`)
+        } else {
+          addTerminalOutput(`❌ Failed to save ${filePath}: ${data.error}`)
+          return
+        }
       } else {
-        addTerminalOutput(`❌ Failed to save ${filePath}: ${data.error}`)
+        addTerminalOutput(`❌ Failed to save ${filePath}: HTTP ${response.status}`)
         return
       }
-    } else {
-      addTerminalOutput(`❌ Failed to save ${filePath}: HTTP ${response.status}`)
-      return
-    }
 
-    // Update WebContainer if available
-    if (useWebContainer && isContainerReady) {
-      try {
-        const session = await webContainerManager.getSession(projectId)
-        if (session.container) {
-          await session.container.fs.writeFile(filePath, content)
-          webContainerManager.updateActivity(projectId)
+      // Update WebContainer if available
+      if (useWebContainer && isContainerReady) {
+        try {
+          const session = await webContainerManager.getSession(projectId)
+          if (session.container) {
+            await session.container.fs.writeFile(filePath, content)
+            webContainerManager.updateActivity(projectId)
+          }
+        } catch (error) {
+          console.error("Error updating WebContainer file:", error)
         }
-      } catch (error) {
-        console.error("Error updating WebContainer file:", error)
       }
-    }
 
-    // Schedule sync
-    scheduleSync()
-  } catch (error) {
-    console.error("Error saving file:", error)
-    addTerminalOutput(`❌ Error saving ${filePath}: ${error instanceof Error ? error.message : "Unknown error"}`)
+      // Schedule sync
+      scheduleSync()
+    } catch (error) {
+      console.error("Error saving file:", error)
+      addTerminalOutput(`❌ Error saving ${filePath}: ${error instanceof Error ? error.message : "Unknown error"}`)
+    }
   }
-}
 
   const createNewFile = async (parentPath: string, fileName: string, isDirectory = false) => {
     const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName
