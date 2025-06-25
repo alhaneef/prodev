@@ -1,12 +1,68 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { getUser } from "@/lib/auth"
-import { GitHubStorageService } from "@/lib/github-storage"
+import { db } from "@/lib/database"
+import { GitHubService } from "@/lib/github"
+import { getUserFromSession } from "@/lib/auth"
+
+interface FileNode {
+  name: string
+  path: string
+  type: "file" | "directory"
+  children?: FileNode[]
+  size?: number
+  lastModified?: string
+}
+
+function buildFileTree(files: any[]): FileNode[] {
+  const tree: FileNode[] = []
+  const pathMap = new Map<string, FileNode>()
+
+  // Sort files to ensure directories come before their contents
+  files.sort((a, b) => {
+    if (a.type === "dir" && b.type === "file") return -1
+    if (a.type === "file" && b.type === "dir") return 1
+    return a.path.localeCompare(b.path)
+  })
+
+  for (const file of files) {
+    const pathParts = file.path.split("/").filter(Boolean)
+    let currentPath = ""
+    let currentLevel = tree
+
+    for (let i = 0; i < pathParts.length; i++) {
+      const part = pathParts[i]
+      currentPath = currentPath ? `${currentPath}/${part}` : part
+
+      let node = pathMap.get(currentPath)
+
+      if (!node) {
+        const isLastPart = i === pathParts.length - 1
+        node = {
+          name: part,
+          path: currentPath,
+          type: isLastPart && file.type === "file" ? "file" : "directory",
+          children: isLastPart && file.type === "file" ? undefined : [],
+          size: file.size,
+          lastModified: file.lastModified,
+        }
+
+        pathMap.set(currentPath, node)
+        currentLevel.push(node)
+      }
+
+      if (node.children) {
+        currentLevel = node.children
+      }
+    }
+  }
+
+  return tree
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getUser(request)
+    const user = getUserFromSession(request)
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
     const { searchParams } = new URL(request.url)
@@ -15,119 +71,229 @@ export async function GET(request: NextRequest) {
     const includeContent = searchParams.get("includeContent") !== "false"
 
     if (!projectId) {
-      return NextResponse.json({ error: "Project ID is required" }, { status: 400 })
+      return NextResponse.json({ success: false, error: "Project ID required" })
     }
 
-    const githubStorage = new GitHubStorageService(process.env.GITHUB_TOKEN!, user.username, `prodev-${projectId}`)
+    // Verify project ownership
+    const project = await db.getProject(projectId)
+    if (!project || project.user_id !== user.id) {
+      return NextResponse.json({ success: false, error: "Project not found" })
+    }
+
+    const credentials = await db.getCredentials(user.id)
+    if (!credentials?.github_token) {
+      return NextResponse.json({ success: false, error: "GitHub credentials required" })
+    }
+
+    const github = new GitHubService(credentials.github_token)
+    const [owner, repo] = project.repository.split("/").slice(-2)
 
     if (filePath) {
       // Get specific file content
       try {
-        const content = await githubStorage.getFileContent(filePath)
+        const fileContent = await github.getFileContent(owner, repo, filePath)
+
+        // Check if file is protected
+        const protectedFiles = await getProtectedFiles(projectId)
+        const isProtected = protectedFiles.includes(filePath)
+        const isReadOnly = filePath.startsWith(".prodev/") || isProtected
+
         return NextResponse.json({
           success: true,
-          content,
-          path: filePath,
+          content: fileContent.content,
+          isProtected,
+          isReadOnly,
         })
       } catch (error) {
-        return NextResponse.json({ error: "File not found" }, { status: 404 })
+        return NextResponse.json({
+          success: false,
+          error: `Failed to load file: ${error instanceof Error ? error.message : "Unknown error"}`,
+        })
       }
     } else {
-      // Get all files
+      // Get file tree
       try {
-        const files = await githubStorage.listFiles("", includeContent)
+        const files = await github.listFiles(owner, repo)
+        const fileTree = buildFileTree(files)
+
         return NextResponse.json({
           success: true,
-          files,
+          files: fileTree,
         })
       } catch (error) {
-        console.error("Error listing files:", error)
-        return NextResponse.json({ error: "Failed to list files" }, { status: 500 })
+        return NextResponse.json({
+          success: false,
+          error: `Failed to load files: ${error instanceof Error ? error.message : "Unknown error"}`,
+        })
       }
     }
   } catch (error) {
-    console.error("Error in files API:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error("Files API error:", error)
+    return NextResponse.json({
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to process request",
+    })
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getUser(request)
+    const user = getUserFromSession(request)
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const body = await request.json()
-    const { projectId, action, filePath, content, files } = body
+    const { projectId, action, filePath, content, isProtected } = await request.json()
 
-    if (!projectId) {
-      return NextResponse.json({ error: "Project ID is required" }, { status: 400 })
+    // Verify project ownership
+    const project = await db.getProject(projectId)
+    if (!project || project.user_id !== user.id) {
+      return NextResponse.json({ success: false, error: "Project not found" })
     }
 
-    const githubStorage = new GitHubStorageService(process.env.GITHUB_TOKEN!, user.username, `prodev-${projectId}`)
+    const credentials = await db.getCredentials(user.id)
+    if (!credentials?.github_token) {
+      return NextResponse.json({ success: false, error: "GitHub credentials required" })
+    }
+
+    const github = new GitHubService(credentials.github_token)
+    const [owner, repo] = project.repository.split("/").slice(-2)
 
     switch (action) {
-      case "create":
       case "update":
-        if (!filePath || content === undefined) {
-          return NextResponse.json({ error: "File path and content are required" }, { status: 400 })
+        // Check if file is protected
+        const protectedFiles = await getProtectedFiles(projectId)
+        if (protectedFiles.includes(filePath)) {
+          return NextResponse.json({ success: false, error: "File is protected from editing" })
         }
+
         try {
-          await githubStorage.updateFileContent(filePath, content, `Update ${filePath}`)
+          const existingFile = await github.getFileContent(owner, repo, filePath)
+          await github.updateFile(owner, repo, filePath, content, `📝 Update ${filePath}`, existingFile.sha)
+
+          // Log live update
+          await logLiveUpdate(projectId, {
+            type: "file_updated",
+            path: filePath,
+            message: `Updated ${filePath}`,
+            timestamp: new Date().toISOString(),
+          })
+
           return NextResponse.json({ success: true })
         } catch (error) {
-          console.error("Error updating file:", error)
-          return NextResponse.json({ error: "Failed to update file" }, { status: 500 })
+          return NextResponse.json({
+            success: false,
+            error: `Failed to update file: ${error instanceof Error ? error.message : "Unknown error"}`,
+          })
+        }
+
+      case "create":
+        try {
+          await github.createFile(owner, repo, filePath, content, `✨ Create ${filePath}`)
+
+          // Log live update
+          await logLiveUpdate(projectId, {
+            type: "file_created",
+            path: filePath,
+            message: `Created ${filePath}`,
+            timestamp: new Date().toISOString(),
+          })
+
+          return NextResponse.json({ success: true })
+        } catch (error) {
+          return NextResponse.json({
+            success: false,
+            error: `Failed to create file: ${error instanceof Error ? error.message : "Unknown error"}`,
+          })
         }
 
       case "delete":
-        if (!filePath) {
-          return NextResponse.json({ error: "File path is required" }, { status: 400 })
-        }
-        try {
-          await githubStorage.deleteFile(filePath, `Delete ${filePath}`)
-          return NextResponse.json({ success: true })
-        } catch (error) {
-          console.error("Error deleting file:", error)
-          return NextResponse.json({ error: "Failed to delete file" }, { status: 500 })
+        // Check if file is protected
+        const protectedFilesForDelete = await getProtectedFiles(projectId)
+        if (protectedFilesForDelete.includes(filePath)) {
+          return NextResponse.json({ success: false, error: "File is protected from deletion" })
         }
 
-      case "create_directory":
-        if (!filePath) {
-          return NextResponse.json({ error: "Directory path is required" }, { status: 400 })
-        }
         try {
-          // Create a .gitkeep file in the directory to ensure it exists
-          await githubStorage.updateFileContent(`${filePath}/.gitkeep`, "", `Create directory ${filePath}`)
+          const existingFile = await github.getFileContent(owner, repo, filePath)
+          await github.updateFile(owner, repo, filePath, "", `🗑️ Delete ${filePath}`, existingFile.sha)
+
+          // Log live update
+          await logLiveUpdate(projectId, {
+            type: "file_deleted",
+            path: filePath,
+            message: `Deleted ${filePath}`,
+            timestamp: new Date().toISOString(),
+          })
+
           return NextResponse.json({ success: true })
         } catch (error) {
-          console.error("Error creating directory:", error)
-          return NextResponse.json({ error: "Failed to create directory" }, { status: 500 })
+          return NextResponse.json({
+            success: false,
+            error: `Failed to delete file: ${error instanceof Error ? error.message : "Unknown error"}`,
+          })
         }
 
-      case "bulk_update":
-        if (!files || !Array.isArray(files)) {
-          return NextResponse.json({ error: "Files array is required" }, { status: 400 })
-        }
+      case "protect":
         try {
-          // Update multiple files in batch
-          for (const file of files) {
-            if (file.path && file.content !== undefined) {
-              await githubStorage.updateFileContent(file.path, file.content, "Bulk update")
-            }
-          }
+          await setFileProtection(projectId, filePath, isProtected)
           return NextResponse.json({ success: true })
         } catch (error) {
-          console.error("Error bulk updating files:", error)
-          return NextResponse.json({ error: "Failed to bulk update files" }, { status: 500 })
+          return NextResponse.json({
+            success: false,
+            error: `Failed to update protection: ${error instanceof Error ? error.message : "Unknown error"}`,
+          })
         }
 
       default:
-        return NextResponse.json({ error: "Invalid action" }, { status: 400 })
+        return NextResponse.json({ success: false, error: "Invalid action" })
     }
   } catch (error) {
-    console.error("Error in files POST API:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error("Files POST API error:", error)
+    return NextResponse.json({
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to process request",
+    })
+  }
+}
+
+// Helper functions
+async function getProtectedFiles(projectId: string): Promise<string[]> {
+  try {
+    const protection = await db.query("SELECT protected_files FROM project_settings WHERE project_id = $1", [projectId])
+    return protection.rows[0]?.protected_files || []
+  } catch {
+    return []
+  }
+}
+
+async function setFileProtection(projectId: string, filePath: string, isProtected: boolean): Promise<void> {
+  const currentProtected = await getProtectedFiles(projectId)
+
+  let updatedProtected: string[]
+  if (isProtected) {
+    updatedProtected = [...currentProtected, filePath]
+  } else {
+    updatedProtected = currentProtected.filter((path) => path !== filePath)
+  }
+
+  await db.query(
+    `INSERT INTO project_settings (project_id, protected_files) 
+     VALUES ($1, $2) 
+     ON CONFLICT (project_id) 
+     DO UPDATE SET protected_files = $2`,
+    [projectId, JSON.stringify(updatedProtected)],
+  )
+}
+
+async function logLiveUpdate(projectId: string, update: any): Promise<void> {
+  try {
+    await db.query(
+      `INSERT INTO live_updates (project_id, update_data, created_at) 
+       VALUES ($1, $2, NOW())`,
+      [projectId, JSON.stringify(update)],
+    )
+  } catch (error) {
+    console.error("Error logging live update:", error)
   }
 }

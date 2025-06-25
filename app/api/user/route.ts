@@ -1,24 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/database"
-
-function getUserFromSession(request: NextRequest) {
-  try {
-    const sessionCookie = request.cookies.get("user-session")?.value
-    console.log("Session cookie exists:", !!sessionCookie)
-
-    if (!sessionCookie) {
-      console.log("No session cookie found")
-      return null
-    }
-
-    const user = JSON.parse(sessionCookie)
-    console.log("Parsed user from session:", user.email, "ID:", user.id)
-    return user
-  } catch (error) {
-    console.error("Error parsing session cookie:", error)
-    return null
-  }
-}
+import { getUserFromSession } from "@/lib/auth"
 
 export async function GET(request: NextRequest) {
   try {

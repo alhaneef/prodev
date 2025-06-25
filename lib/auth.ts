@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs"
 import { db } from "./database"
+import type { NextRequest } from "next/server"
 
 export interface AuthUser {
   id: number
@@ -55,9 +56,29 @@ export class AuthService {
 }
 
 /**
- * Get a user by id OR email.
- * @param identifier – user id (number) **or** email address (string).
- * @returns The AuthUser object or `null` if the user is not found.
+ * Get user from session cookie in NextRequest
+ */
+export function getUserFromSession(request: NextRequest): AuthUser | null {
+  try {
+    const sessionCookie = request.cookies.get("user-session")?.value
+    console.log("Session cookie exists:", !!sessionCookie)
+
+    if (!sessionCookie) {
+      console.log("No session cookie found")
+      return null
+    }
+
+    const user = JSON.parse(sessionCookie)
+    console.log("Parsed user from session:", user.email, "ID:", user.id)
+    return user
+  } catch (error) {
+    console.error("Error parsing session cookie:", error)
+    return null
+  }
+}
+
+/**
+ * Get user by ID or email from database
  */
 export async function getUser(identifier: number | string): Promise<AuthUser | null> {
   try {
@@ -68,6 +89,30 @@ export async function getUser(identifier: number | string): Promise<AuthUser | n
     return { id: user.id, email: user.email }
   } catch (error) {
     console.error("getUser error:", error)
+    return null
+  }
+}
+
+/**
+ * Get authenticated user from request (combines session parsing and DB verification)
+ */
+export async function getAuthenticatedUser(request: NextRequest): Promise<AuthUser | null> {
+  try {
+    const sessionUser = getUserFromSession(request)
+    if (!sessionUser) {
+      return null
+    }
+
+    // Verify user still exists in database
+    const dbUser = await db.getUserById(sessionUser.id)
+    if (!dbUser) {
+      console.log("User not found in database:", sessionUser.id)
+      return null
+    }
+
+    return { id: dbUser.id, email: dbUser.email }
+  } catch (error) {
+    console.error("getAuthenticatedUser error:", error)
     return null
   }
 }
