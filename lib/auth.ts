@@ -1,119 +1,85 @@
-import bcrypt from "bcryptjs"
-import { db } from "./database"
 import type { NextRequest } from "next/server"
+import { db } from "./database"
+import bcrypt from "bcryptjs"
 
-export interface AuthUser {
+export interface SessionUser {
   id: number
   email: string
+  name?: string
 }
 
 export class AuthService {
-  async signUp(email: string, password: string): Promise<{ user: AuthUser }> {
-    try {
-      // Check if user already exists
-      const existingUser = await db.getUserByEmail(email)
-      if (existingUser) {
-        throw new Error("User already exists")
-      }
+  async signUp(email: string, password: string) {
+    const existing = await db.getUserByEmail(email)
+    if (existing) throw new Error("User already exists")
 
-      // Hash password
-      const passwordHash = await bcrypt.hash(password, 12)
+    const hash = await bcrypt.hash(password, 12)
+    const user = await db.createUser(email, hash)
 
-      // Create user
-      const user = await db.createUser(email, passwordHash)
-
-      return {
-        user: { id: user.id, email: user.email },
-      }
-    } catch (error) {
-      console.error("SignUp error:", error)
-      throw error
-    }
+    return { user: { id: user.id, email: user.email } }
   }
 
-  async signIn(email: string, password: string): Promise<{ user: AuthUser }> {
-    try {
-      // Get user
-      const user = await db.getUserByEmail(email)
-      if (!user) {
-        throw new Error("Invalid credentials")
-      }
+  async signIn(email: string, password: string) {
+    const user = await db.getUserByEmail(email)
+    if (!user) throw new Error("Invalid credentials")
 
-      // Verify password
-      const isValid = await bcrypt.compare(password, user.password_hash)
-      if (!isValid) {
-        throw new Error("Invalid credentials")
-      }
+    const valid = await bcrypt.compare(password, user.password_hash)
+    if (!valid) throw new Error("Invalid credentials")
 
-      return {
-        user: { id: user.id, email: user.email },
-      }
-    } catch (error) {
-      console.error("SignIn error:", error)
-      throw error
-    }
+    return { user: { id: user.id, email: user.email } }
   }
 }
 
-/**
- * Get user from session cookie in NextRequest
- */
-export function getUserFromSession(request: NextRequest): AuthUser | null {
+export function getUserFromSession(request: NextRequest): SessionUser | null {
   try {
     const sessionCookie = request.cookies.get("user-session")?.value
-    console.log("Session cookie exists:", !!sessionCookie)
-
     if (!sessionCookie) {
-      console.log("No session cookie found")
+      console.log("No user-session cookie found")
       return null
     }
 
     const user = JSON.parse(sessionCookie)
-    console.log("Parsed user from session:", user.email, "ID:", user.id)
+    console.log("Retrieved user from session:", { id: user.id, email: user.email })
     return user
   } catch (error) {
-    console.error("Error parsing session cookie:", error)
+    console.error("Error parsing user session:", error)
     return null
   }
 }
 
-/**
- * Get user by ID or email from database
- */
-export async function getUser(identifier: number | string): Promise<AuthUser | null> {
+export async function getUserCredentials(userId: number) {
   try {
-    const user = typeof identifier === "number" ? await db.getUserById(identifier) : await db.getUserByEmail(identifier)
+    console.log("Fetching credentials for user ID:", userId)
+    const credentials = await db.getCredentials(userId)
 
-    if (!user) return null
+    if (!credentials) {
+      console.log("No credentials found for user:", userId)
+      return null
+    }
 
-    return { id: user.id, email: user.email }
+    console.log("Found credentials for user:", userId, "Keys:", Object.keys(credentials))
+    return credentials
   } catch (error) {
-    console.error("getUser error:", error)
+    console.error("Error fetching user credentials:", error)
     return null
   }
 }
 
-/**
- * Get authenticated user from request (combines session parsing and DB verification)
- */
-export async function getAuthenticatedUser(request: NextRequest): Promise<AuthUser | null> {
-  try {
-    const sessionUser = getUserFromSession(request)
-    if (!sessionUser) {
-      return null
-    }
+export async function requireGitHubToken(request: NextRequest) {
+  const user = getUserFromSession(request)
+  if (!user) {
+    throw new Error("User not authenticated")
+  }
 
-    // Verify user still exists in database
-    const dbUser = await db.getUserById(sessionUser.id)
-    if (!dbUser) {
-      console.log("User not found in database:", sessionUser.id)
-      return null
-    }
+  const credentials = await getUserCredentials(user.id)
+  if (!credentials?.github_token) {
+    throw new Error("GitHub token not configured")
+  }
 
-    return { id: dbUser.id, email: dbUser.email }
-  } catch (error) {
-    console.error("getAuthenticatedUser error:", error)
-    return null
+  return {
+    user,
+    credentials,
+    githubToken: credentials.github_token,
   }
 }
 
