@@ -1,22 +1,46 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { getUserFromSession } from "@/lib/auth"
+import { db } from "@/lib/database"
 import { GitHubService } from "@/lib/github-service"
 import { GitHubStorageService } from "@/lib/github-storage"
 import { AIAgent } from "@/lib/ai-agent"
-import { db } from "@/lib/database" // Declare the db variable
+import { getUserFromSession as getSessionFromAuth } from "@/lib/auth"
+
+function getUserFromSession(request: NextRequest) {
+  try {
+    const sessionCookie = request.cookies.get("user-session")?.value
+    if (!sessionCookie) return null
+    return JSON.parse(sessionCookie)
+  } catch {
+    return null
+  }
+}
+
+// Unified user session function that tries both methods
+async function getUser(request: NextRequest) {
+  // Try the auth library first
+  try {
+    const user = await getSessionFromAuth(request)
+    if (user) return user
+  } catch (error) {
+    console.log("Auth library getUserFromSession failed, trying local method")
+  }
+  
+  // Fallback to local method
+  return getUserFromSession(request)
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getUserFromSession(request)
+    const user = await getUser(request)
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
     const { searchParams } = new URL(request.url)
     const projectId = searchParams.get("projectId")
 
     if (!projectId) {
-      return NextResponse.json({ error: "Project ID is required" }, { status: 400 })
+      return NextResponse.json({ success: false, error: "Project ID required" })
     }
 
     // Get project and verify ownership
@@ -53,16 +77,19 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getUserFromSession(request)
+    const user = await getUser(request)
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const body = await request.json()
-    const { projectId, message, conversationHistory, action } = body
+    const { projectId, action, message, conversationHistory, replyTo } = await request.json()
 
-    if (!projectId || !message) {
-      return NextResponse.json({ error: "Project ID and message are required" }, { status: 400 })
+    if (!projectId) {
+      return NextResponse.json({ success: false, error: "Project ID required" })
+    }
+
+    if (!message && action !== "autonomous_followup") {
+      return NextResponse.json({ success: false, error: "Message required" })
     }
 
     // Get project and verify ownership
@@ -86,28 +113,36 @@ export async function POST(request: NextRequest) {
 
     const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
 
-    // Get project context
-    let metadata = await githubStorage.getProjectMetadata()
-    if (!metadata) {
-      metadata = {
-        name: `Project ${projectId}`,
-        description: "A software project",
-        framework: "React",
-        progress: 0,
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-      await githubStorage.saveProjectMetadata(metadata)
-    }
+    // Get project context/metadata
+    let metadata = null
+    let projectContext = project
 
-    const projectContext = {
-      id: projectId,
-      name: metadata.name,
-      description: metadata.description,
-      framework: metadata.framework,
-      repository: `${owner}/${repo}`,
-      progress: metadata.progress,
+    try {
+      metadata = await githubStorage.getProjectMetadata()
+      if (!metadata) {
+        metadata = {
+          name: `Project ${projectId}`,
+          description: "A software project",
+          framework: "React",
+          progress: 0,
+          status: "active",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+        await githubStorage.saveProjectMetadata(metadata)
+      }
+
+      projectContext = {
+        ...project,
+        id: projectId,
+        name: metadata.name,
+        description: metadata.description,
+        framework: metadata.framework,
+        repository: `${owner}/${repo}`,
+        progress: metadata.progress,
+      }
+    } catch (error) {
+      console.log("Could not load project metadata, using project data:", error)
     }
 
     try {
@@ -139,39 +174,42 @@ export async function POST(request: NextRequest) {
       }
 
       // Save conversation to memory
-      try {
-        const memory = await githubStorage.getAgentMemory()
-        const updatedHistory = [
-          ...(memory?.conversationHistory || []),
-          {
-            role: "user",
-            content: message,
-            timestamp: new Date().toISOString(),
-          },
-          {
-            role: "assistant",
-            content: response,
-            timestamp: new Date().toISOString(),
-          },
-        ].slice(-50) // Keep last 50 messages
+      if (message && response) {
+        try {
+          const memory = await githubStorage.getAgentMemory()
+          const updatedHistory = [
+            ...(memory?.conversationHistory || []),
+            {
+              role: "user",
+              content: message,
+              timestamp: new Date().toISOString(),
+              replyTo: replyTo || null,
+            },
+            {
+              role: "assistant",
+              content: response,
+              timestamp: new Date().toISOString(),
+            },
+          ].slice(-50) // Keep last 50 messages
 
-        const updatedMemory = {
-          projectId,
-          conversationHistory: updatedHistory,
-          taskHistory: memory?.taskHistory || [],
-          codeContext: memory?.codeContext || [],
-          learnings: memory?.learnings || {},
-          currentFocus: "Development",
-          lastUpdate: new Date().toISOString(),
-          fileCache: memory?.fileCache || {},
-          codebaseIndex: memory?.codebaseIndex || {},
-          userPreferences: memory?.userPreferences || {},
-          projectInsights: memory?.projectInsights || {},
+          const updatedMemory = {
+            projectId,
+            conversationHistory: updatedHistory,
+            taskHistory: memory?.taskHistory || [],
+            codeContext: memory?.codeContext || [],
+            learnings: memory?.learnings || {},
+            currentFocus: "Development",
+            lastUpdate: new Date().toISOString(),
+            fileCache: memory?.fileCache || {},
+            codebaseIndex: memory?.codebaseIndex || {},
+            userPreferences: memory?.userPreferences || {},
+            projectInsights: memory?.projectInsights || {},
+          }
+
+          await githubStorage.saveAgentMemory(updatedMemory)
+        } catch (error) {
+          console.error("Error saving conversation memory:", error)
         }
-
-        await githubStorage.saveAgentMemory(updatedMemory)
-      } catch (error) {
-        console.error("Error saving conversation memory:", error)
       }
 
       const responseData = {
@@ -215,7 +253,10 @@ async function handleAutonomousFollowUp(
   credentials: any,
 ): Promise<{ response: string; needsMoreFollowUp: boolean }> {
   // Get the last agent message to understand what it planned to do
-  const lastAgentMessage = conversationHistory.filter((msg) => msg.role === "assistant").pop()?.content || ""
+  // Support both "agent" and "assistant" roles for broader compatibility
+  const lastAgentMessage = conversationHistory.filter((msg) => 
+    msg.role === "agent" || msg.role === "assistant"
+  ).pop()?.content || ""
 
   let response = ""
   let needsMoreFollowUp = false
