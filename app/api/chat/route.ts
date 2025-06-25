@@ -65,17 +65,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Project ID and message are required" }, { status: 400 })
     }
 
-    if (!process.env.GITHUB_TOKEN) {
+    if (!credentials?.github_token) {
       return NextResponse.json({ error: "GitHub token not configured" }, { status: 500 })
     }
 
-    if (!process.env.GOOGLE_AI_API_KEY) {
+    if (!credentials?.gemini_api_key) {
       return NextResponse.json({ error: "AI service not configured" }, { status: 500 })
     }
 
-    const github = new GitHubService(process.env.GITHUB_TOKEN)
+    const github = new GitHubService(credentials.github_token)
     const githubStorage = new GitHubStorageService(github, user.username, `prodev-${projectId}`)
-    const aiAgent = new AIAgent(process.env.GOOGLE_AI_API_KEY, githubStorage, github)
+    const aiAgent = new AIAgent(credentials.gemini_api_key, githubStorage, github)
 
     // Get project context
     let metadata = await githubStorage.getProjectMetadata()
