@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Smartphone, Globe, Database, Zap, GitBranch, Loader2, AlertCircle } from "lucide-react"
+import { Smartphone, Globe, Database, Zap, GitBranch, Loader2, AlertCircle, Bot, Lightbulb } from "lucide-react"
 
 interface CreateProjectDialogProps {
   open: boolean
@@ -65,14 +65,17 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
   const [selectedTemplate, setSelectedTemplate] = useState<string>("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const [generateAITasks, setGenerateAITasks] = useState(false)
   const [projectData, setProjectData] = useState({
     name: "",
     description: "",
     framework: "",
+    context: "",
+    aiTaskContext: "",
   })
 
   const handleNext = () => {
-    if (step < 2) setStep(step + 1)
+    if (step < 3) setStep(step + 1)
   }
 
   const handleBack = () => {
@@ -93,6 +96,9 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
           description: projectData.description,
           framework: projectData.framework,
           template: selectedTemplate,
+          context: projectData.context,
+          generateAITasks,
+          aiTaskContext: projectData.aiTaskContext,
         }),
       })
 
@@ -105,10 +111,13 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
       // Reset form
       setStep(1)
       setSelectedTemplate("")
+      setGenerateAITasks(false)
       setProjectData({
         name: "",
         description: "",
         framework: "",
+        context: "",
+        aiTaskContext: "",
       })
 
       onOpenChange(false)
@@ -234,8 +243,22 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
                   placeholder="Describe what your application should do..."
                   value={projectData.description}
                   onChange={(e) => setProjectData((prev) => ({ ...prev, description: e.target.value }))}
+                  rows={3}
+                />
+              </div>
+
+              <div className="space-y-2 mt-4">
+                <Label htmlFor="context">Project Context & Goals</Label>
+                <Textarea
+                  id="context"
+                  placeholder="Provide detailed context about what you want to build, target audience, key features, and any specific requirements..."
+                  value={projectData.context}
+                  onChange={(e) => setProjectData((prev) => ({ ...prev, context: e.target.value }))}
                   rows={4}
                 />
+                <p className="text-xs text-slate-500">
+                  This context will help the AI understand your project better and provide more relevant assistance.
+                </p>
               </div>
 
               <div className="p-4 bg-blue-50 rounded-lg">
@@ -246,6 +269,80 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
                 <p className="text-sm text-blue-700">
                   A new GitHub repository will be created automatically for your project with AI-generated starter code
                 </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-6">
+            <div>
+              <h3 className="text-lg font-semibold mb-4">AI Task Generation</h3>
+
+              <div className="space-y-4">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="generate-ai-tasks"
+                    checked={generateAITasks}
+                    onChange={(e) => setGenerateAITasks(e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
+                  <Label htmlFor="generate-ai-tasks" className="text-sm font-medium">
+                    Generate AI tasks for this project
+                  </Label>
+                </div>
+
+                {generateAITasks && (
+                  <div className="space-y-4">
+                    <div>
+                      <Label htmlFor="ai-task-context">Task Generation Context</Label>
+                      <Textarea
+                        id="ai-task-context"
+                        placeholder="Describe specific features, functionality, or improvements you want the AI to create tasks for..."
+                        value={projectData.aiTaskContext}
+                        onChange={(e) => setProjectData((prev) => ({ ...prev, aiTaskContext: e.target.value }))}
+                        rows={5}
+                        className="mt-1"
+                      />
+                    </div>
+
+                    <div className="bg-purple-50 p-4 rounded-lg">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Bot className="h-4 w-4 text-purple-600" />
+                        <span className="font-medium text-purple-900">AI Task Examples</span>
+                      </div>
+                      <ul className="text-sm text-purple-700 space-y-1">
+                        <li>• "Create user authentication with email/password and social login"</li>
+                        <li>• "Build a responsive dashboard with data visualization charts"</li>
+                        <li>• "Implement real-time notifications and messaging system"</li>
+                        <li>• "Add payment processing with Stripe integration"</li>
+                        <li>• "Create admin panel for user and content management"</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-amber-50 p-4 rounded-lg">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Lightbulb className="h-4 w-4 text-amber-600" />
+                        <span className="font-medium text-amber-900">Pro Tip</span>
+                      </div>
+                      <p className="text-sm text-amber-700">
+                        The more specific you are about your requirements, the better the AI can generate relevant and
+                        actionable tasks. Include details about user flows, technical requirements, and desired
+                        outcomes.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {!generateAITasks && (
+                  <div className="bg-slate-50 p-4 rounded-lg">
+                    <p className="text-sm text-slate-600">
+                      You can always generate AI tasks later from the project dashboard. The AI will analyze your
+                      project context and create relevant development tasks.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -263,12 +360,23 @@ export function CreateProjectDialog({ open, onOpenChange, onProjectCreated }: Cr
             <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
               Cancel
             </Button>
-            {step < 2 ? (
-              <Button onClick={handleNext} disabled={!selectedTemplate}>
+            {step < 3 ? (
+              <Button
+                onClick={handleNext}
+                disabled={!selectedTemplate || (step === 2 && (!projectData.name || !projectData.framework))}
+              >
                 Next
               </Button>
             ) : (
-              <Button onClick={handleCreate} disabled={!projectData.name || !projectData.framework || loading}>
+              <Button
+                onClick={handleCreate}
+                disabled={
+                  !projectData.name ||
+                  !projectData.framework ||
+                  loading ||
+                  (generateAITasks && !projectData.aiTaskContext.trim())
+                }
+              >
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />

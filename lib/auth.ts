@@ -54,4 +54,22 @@ export class AuthService {
   }
 }
 
+/**
+ * Get a user by id OR email.
+ * @param identifier – user id (number) **or** email address (string).
+ * @returns The AuthUser object or `null` if the user is not found.
+ */
+export async function getUser(identifier: number | string): Promise<AuthUser | null> {
+  try {
+    const user = typeof identifier === "number" ? await db.getUserById(identifier) : await db.getUserByEmail(identifier)
+
+    if (!user) return null
+
+    return { id: user.id, email: user.email }
+  } catch (error) {
+    console.error("getUser error:", error)
+    return null
+  }
+}
+
 export const authService = new AuthService()

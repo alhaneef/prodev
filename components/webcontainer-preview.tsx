@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Input } from "@/components/ui/input"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Play,
   Square,
@@ -24,6 +25,8 @@ import {
   FolderOpen,
   AlertTriangle,
   ExternalLink,
+  Plus,
+  Trash2,
 } from "lucide-react"
 import { WebContainerManager } from "@/lib/webcontainer-service"
 
@@ -255,6 +258,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     const tree: FileNode[] = []
     const pathMap = new Map<string, FileNode>()
 
+    // Sort files to ensure directories come before their contents
     fileList.sort((a, b) => {
       if (a.type === "dir" && b.type === "file") return -1
       if (a.type === "file" && b.type === "dir") return 1
@@ -413,6 +417,72 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     }
   }
 
+  const createNewFile = async (parentPath: string, fileName: string, isDirectory = false) => {
+    const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName
+
+    try {
+      if (isDirectory) {
+        // Create directory
+        const response = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            projectId,
+            action: "create_directory",
+            filePath: fullPath,
+          }),
+        })
+
+        if (response.ok) {
+          addTerminalOutput(`📁 Created directory: ${fullPath}`)
+          await loadProjectFiles() // Refresh file tree
+        }
+      } else {
+        // Create file
+        await saveFileContent(fullPath, "")
+        addTerminalOutput(`📄 Created file: ${fullPath}`)
+        await loadProjectFiles() // Refresh file tree
+      }
+    } catch (error) {
+      addTerminalOutput(
+        `❌ Error creating ${isDirectory ? "directory" : "file"}: ${error instanceof Error ? error.message : "Unknown error"}`,
+      )
+    }
+  }
+
+  const deleteFile = async (filePath: string) => {
+    try {
+      const response = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          projectId,
+          action: "delete",
+          filePath,
+        }),
+      })
+
+      if (response.ok) {
+        // Remove from cache
+        fileCache.current.delete(filePath)
+        saveCacheToStorage()
+
+        addTerminalOutput(`🗑️ Deleted: ${filePath}`)
+        await loadProjectFiles() // Refresh file tree
+
+        // Clear selected file if it was deleted
+        if (selectedFile?.path === filePath) {
+          setSelectedFile(null)
+          setFileContent("")
+        }
+      }
+    } catch (error) {
+      addTerminalOutput(`❌ Error deleting file: ${error instanceof Error ? error.message : "Unknown error"}`)
+    }
+  }
+
   const startDevServer = async () => {
     if (!useWebContainer) {
       // Fallback: Open GitHub Codespaces or similar
@@ -488,6 +558,28 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     const command = commandInput.trim()
     setCommandInput("")
     addTerminalOutput(`$ ${command}`)
+
+    // Handle special commands
+    if (command === "ls" || command === "dir") {
+      const fileList = Object.keys(fileCache.current)
+      addTerminalOutput("Files and directories:")
+      fileList.forEach((file, index) => {
+        addTerminalOutput(`${index + 1}. ${file}`)
+      })
+      return
+    }
+
+    if (command.startsWith("cat ")) {
+      const filePath = command.substring(4).trim()
+      const content = await loadFileContent(filePath)
+      if (content) {
+        addTerminalOutput(`Content of ${filePath}:`)
+        addTerminalOutput(content.substring(0, 500) + (content.length > 500 ? "..." : ""))
+      } else {
+        addTerminalOutput(`File not found: ${filePath}`)
+      }
+      return
+    }
 
     if (!useWebContainer) {
       addTerminalOutput("❌ Terminal not available in fallback mode")
@@ -579,7 +671,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
     return filtered.map((node) => (
       <div key={node.path}>
         <div
-          className={`flex items-center gap-2 py-1 px-2 hover:bg-slate-100 cursor-pointer rounded text-sm ${
+          className={`flex items-center gap-2 py-1 px-2 hover:bg-slate-100 cursor-pointer rounded text-sm group ${
             selectedFile?.path === node.path ? "bg-blue-50 text-blue-700" : ""
           }`}
           style={{ marginLeft: `${level * 16}px` }}
@@ -614,6 +706,39 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
           {node.size && node.type === "file" && (
             <span className="text-xs text-slate-400">{Math.round(node.size / 1024)}KB</span>
           )}
+
+          {/* File actions */}
+          <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+            {node.type === "directory" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const fileName = prompt("Enter file name:")
+                  if (fileName) {
+                    createNewFile(node.path, fileName)
+                  }
+                }}
+              >
+                <Plus className="h-3 w-3" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={(e) => {
+                e.stopPropagation()
+                if (confirm(`Delete ${node.name}?`)) {
+                  deleteFile(node.path)
+                }
+              }}
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
         </div>
         {node.type === "directory" && expandedFolders.has(node.path) && node.children && (
           <div>{renderFileTree(node.children, level + 1)}</div>
@@ -680,14 +805,44 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
               <Folder className="h-4 w-4" />
               Files
             </CardTitle>
-            <div className="relative">
-              <Search className="absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
-              <Input
-                placeholder="Search files..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-8 h-8"
-              />
+            <div className="space-y-2">
+              <div className="relative">
+                <Search className="absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
+                <Input
+                  placeholder="Search files..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-8 h-8"
+                />
+              </div>
+              <div className="flex gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const fileName = prompt("Enter file name:")
+                    if (fileName) {
+                      createNewFile("", fileName)
+                    }
+                  }}
+                >
+                  <Plus className="h-3 w-3 mr-1" />
+                  File
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const folderName = prompt("Enter folder name:")
+                    if (folderName) {
+                      createNewFile("", folderName, true)
+                    }
+                  }}
+                >
+                  <Folder className="h-3 w-3 mr-1" />
+                  Folder
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -746,14 +901,16 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                     <div className="flex items-center gap-2 p-3 border-b bg-slate-50">
                       <FileText className="h-4 w-4" />
                       <span className="text-sm font-medium">{selectedFile.name}</span>
+                      <span className="text-xs text-slate-500">{selectedFile.path}</span>
                       {hasUnsavedChanges && <Badge variant="secondary">Unsaved</Badge>}
                     </div>
                     <div className="flex-1">
-                      <textarea
+                      <Textarea
                         value={fileContent}
                         onChange={(e) => handleFileContentChange(e.target.value)}
-                        className="w-full h-full p-4 font-mono text-sm border-0 resize-none focus:outline-none"
+                        className="w-full h-full font-mono text-sm border-0 resize-none focus:outline-none rounded-none"
                         placeholder="File content..."
+                        style={{ minHeight: "100%" }}
                       />
                     </div>
                   </div>
@@ -805,7 +962,7 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                       {terminalOutput.length === 0 && (
                         <div className="text-slate-500">
                           {useWebContainer
-                            ? "WebContainer terminal ready..."
+                            ? "WebContainer terminal ready... Try 'ls' to see files"
                             : "Terminal not available in fallback mode"}
                         </div>
                       )}
@@ -821,11 +978,13 @@ export function WebContainerPreview({ projectId }: WebContainerPreviewProps) {
                             executeCommand()
                           }
                         }}
-                        placeholder={useWebContainer ? "Enter command..." : "Terminal not available"}
+                        placeholder={
+                          useWebContainer ? "Enter command (try 'ls', 'cat filename')..." : "Terminal not available"
+                        }
                         className="bg-black border-slate-700 text-green-400 font-mono"
-                        disabled={!useWebContainer}
+                        disabled={!useWebContainer && !commandInput.startsWith("ls") && !commandInput.startsWith("cat")}
                       />
-                      <Button onClick={executeCommand} disabled={!useWebContainer || !commandInput.trim()}>
+                      <Button onClick={executeCommand} disabled={!commandInput.trim()}>
                         Run
                       </Button>
                     </div>

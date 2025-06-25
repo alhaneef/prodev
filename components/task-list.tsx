@@ -31,6 +31,7 @@ import {
   Search,
   Bot,
   FileText,
+  Lightbulb,
 } from "lucide-react"
 
 interface Task {
@@ -47,6 +48,8 @@ interface Task {
   dependencies?: string[]
   subtasks?: Task[]
   parentTaskId?: string
+  operations?: Array<"create" | "read" | "update" | "delete">
+  context?: string
 }
 
 interface TaskListProps {
@@ -61,8 +64,10 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
   const [implementingAll, setImplementingAll] = useState(false)
   const [generatingTasks, setGeneratingTasks] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [showAITaskDialog, setShowAITaskDialog] = useState(false)
   const [filterStatus, setFilterStatus] = useState<string>("all")
   const [searchQuery, setSearchQuery] = useState("")
+  const [aiTaskContext, setAiTaskContext] = useState("")
   const [newTask, setNewTask] = useState({
     title: "",
     description: "",
@@ -135,6 +140,11 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
   }
 
   const handleGenerateAITasks = async () => {
+    if (!aiTaskContext.trim()) {
+      alert("Please provide context for AI task generation")
+      return
+    }
+
     setGeneratingTasks(true)
     try {
       const response = await fetch("/api/tasks", {
@@ -144,6 +154,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
         body: JSON.stringify({
           projectId,
           action: "generate_ai_tasks",
+          context: aiTaskContext,
         }),
       })
 
@@ -151,6 +162,8 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
         const data = await response.json()
         if (data.success) {
           await loadTasks() // Reload tasks to show generated ones
+          setShowAITaskDialog(false)
+          setAiTaskContext("")
           onTaskUpdate?.("ai_generated", "generated")
         }
       }
@@ -388,10 +401,64 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
-          <Button onClick={handleGenerateAITasks} disabled={generatingTasks} variant="outline">
-            <Bot className="h-4 w-4 mr-2" />
-            {generatingTasks ? "Generating..." : "Generate AI Tasks"}
-          </Button>
+          <Dialog open={showAITaskDialog} onOpenChange={setShowAITaskDialog}>
+            <DialogTrigger asChild>
+              <Button variant="outline">
+                <Bot className="h-4 w-4 mr-2" />
+                Generate AI Tasks
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Generate AI Tasks</DialogTitle>
+                <DialogDescription>
+                  Provide context about what you want to build or achieve, and AI will generate relevant tasks
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium">Project Context & Goals</label>
+                  <Textarea
+                    value={aiTaskContext}
+                    onChange={(e) => setAiTaskContext(e.target.value)}
+                    placeholder="Describe what you want to build, features to add, problems to solve, or improvements to make. Be as specific as possible..."
+                    rows={6}
+                    className="mt-1"
+                  />
+                </div>
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Lightbulb className="h-4 w-4 text-blue-600" />
+                    <span className="font-medium text-blue-900">Examples:</span>
+                  </div>
+                  <ul className="text-sm text-blue-700 space-y-1">
+                    <li>• "Build a user authentication system with login, signup, and password reset"</li>
+                    <li>• "Add a dashboard with charts showing user analytics and metrics"</li>
+                    <li>• "Implement a real-time chat feature with message history"</li>
+                    <li>• "Create an e-commerce product catalog with search and filtering"</li>
+                  </ul>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowAITaskDialog(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleGenerateAITasks} disabled={generatingTasks || !aiTaskContext.trim()}>
+                  {generatingTasks ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Bot className="mr-2 h-4 w-4" />
+                      Generate Tasks
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           {pendingTasksCount > 0 && (
             <Button onClick={handleImplementAll} disabled={implementingAll}>
               <Zap className="h-4 w-4 mr-2" />
@@ -534,6 +601,28 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                         </div>
                         <p className="text-sm text-slate-600 mb-2">{task.description}</p>
 
+                        {/* Task Context */}
+                        {task.context && (
+                          <div className="mb-2">
+                            <p className="text-xs font-medium text-slate-700 mb-1">Context:</p>
+                            <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded">{task.context}</p>
+                          </div>
+                        )}
+
+                        {/* Operations */}
+                        {task.operations && task.operations.length > 0 && (
+                          <div className="mb-2">
+                            <p className="text-xs font-medium text-slate-700 mb-1">Operations:</p>
+                            <div className="flex flex-wrap gap-1">
+                              {task.operations.map((op, index) => (
+                                <Badge key={index} variant="outline" className="text-xs bg-green-50 text-green-700">
+                                  {op.toUpperCase()}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
                         {/* Associated Files */}
                         {task.files && task.files.length > 0 && (
                           <div className="mb-2">
@@ -624,7 +713,7 @@ export function TaskList({ projectId, onTaskUpdate }: TaskListProps) {
                     <Plus className="h-4 w-4 mr-2" />
                     Create Task
                   </Button>
-                  <Button variant="outline" onClick={handleGenerateAITasks} disabled={generatingTasks}>
+                  <Button variant="outline" onClick={() => setShowAITaskDialog(true)}>
                     <Bot className="h-4 w-4 mr-2" />
                     Generate AI Tasks
                   </Button>
