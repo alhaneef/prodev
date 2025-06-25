@@ -31,7 +31,7 @@ const projectTemplates = [
     name: "Web Application",
     description: "Full-stack web application with modern UI",
     icon: Globe,
-    frameworks: ["Next.js", "React", "Vue.js", "Svelte"],
+    frameworks: ["Next.js", "React", "Vue.js", "Svelte", "Javascript"],
     features: ["Authentication", "Database", "API Routes", "Responsive Design"],
   },
   {
