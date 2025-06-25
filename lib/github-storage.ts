@@ -1,155 +1,134 @@
 import type { GitHubService } from "./github"
 
-export interface AgentMemory {
-  projectId: string
-  conversationHistory: Array<{ role: string; content: string; timestamp: string }>
-  taskHistory: any[]
-  codeContext: Array<{ path: string; content: string }>
-  learnings: Record<string, any>
-  currentFocus: string
-  lastUpdate: string
-  fileCache: Record<string, { content: string; lastModified: string }>
+export interface Task {
+  id: string
+  title: string
+  description: string
+  status: "pending" | "in-progress" | "completed" | "failed"
+  priority: "low" | "medium" | "high"
+  type: "ai-generated" | "manual"
+  estimatedTime: string
+  createdAt: string
+  updatedAt: string
+  files?: string[]
+  dependencies?: string[]
+  subtasks?: Task[]
+  parentTaskId?: string
+  operations?: Array<"create" | "read" | "update" | "delete">
+  context?: string
+  acceptanceCriteria?: string[]
+  technicalNotes?: string
 }
 
 export interface ProjectMetadata {
-  id: string
   name: string
   description: string
   framework: string
   progress: number
   status: string
-  created_at: string
-  updated_at: string
-  tasks?: any[]
-  sprints?: any[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AgentMemory {
+  projectId: string
+  conversationHistory: any[]
+  taskHistory: Task[]
+  codeContext: any[]
+  learnings: Record<string, any>
+  currentFocus: string
+  lastUpdate: string
+  fileCache: Record<string, any>
+  codebaseIndex: any
+  userPreferences: any
+  projectInsights: any
 }
 
 export class GitHubStorageService {
   private github: GitHubService
   private owner: string
   private repo: string
-  private fileCache: Map<string, { content: string; lastModified: string }> = new Map()
 
   constructor(github: GitHubService, owner: string, repo: string) {
     this.github = github
     this.owner = owner
     this.repo = repo
-    this.loadCacheFromStorage()
   }
 
-  private loadCacheFromStorage() {
-    if (typeof window !== "undefined") {
-      const cached = localStorage.getItem(`prodev_cache_${this.owner}_${this.repo}`)
-      if (cached) {
-        try {
-          const parsedCache = JSON.parse(cached)
-          this.fileCache = new Map(Object.entries(parsedCache))
-        } catch (error) {
-          console.error("Error loading cache:", error)
-        }
-      }
-    }
-  }
-
-  private saveCacheToStorage() {
-    if (typeof window !== "undefined") {
-      const cacheObj = Object.fromEntries(this.fileCache)
-      localStorage.setItem(`prodev_cache_${this.owner}_${this.repo}`, JSON.stringify(cacheObj))
-    }
-  }
-
-  async getFileContent(path: string, useCache = true): Promise<string> {
-    if (useCache && this.fileCache.has(path)) {
-      return this.fileCache.get(path)!.content
-    }
-
+  async ensureRepository(): Promise<void> {
     try {
-      const fileContent = await this.github.getFileContent(this.owner, this.repo, path)
-      this.fileCache.set(path, {
-        content: fileContent.content,
-        lastModified: new Date().toISOString(),
-      })
-      this.saveCacheToStorage()
-      return fileContent.content
+      await this.github.getRepository(this.owner, this.repo)
     } catch (error) {
-      console.error(`Error getting file content for ${path}:`, error)
-      throw error
+      // Repository doesn't exist, create it
+      await this.github.createRepository(this.repo, "ProDev project repository", false)
+
+      // Initialize with basic structure
+      await this.github.createFile(
+        this.owner,
+        this.repo,
+        ".prodev/config.json",
+        JSON.stringify(
+          {
+            version: "1.0.0",
+            platform: "prodev",
+            createdAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+        "Initialize ProDev configuration",
+      )
     }
   }
 
-  async updateFileContent(path: string, content: string, message: string): Promise<void> {
+  async getTasks(): Promise<Task[]> {
     try {
-      const existingFile = await this.github.getFileContent(this.owner, this.repo, path)
-      await this.github.updateFile(this.owner, this.repo, path, content, message, existingFile.sha)
-
-      // Update cache
-      this.fileCache.set(path, {
-        content: content,
-        lastModified: new Date().toISOString(),
-      })
-      this.saveCacheToStorage()
+      await this.ensureRepository()
+      const content = await this.github.getFileContent(this.owner, this.repo, ".prodev/tasks.json")
+      return JSON.parse(content.content)
     } catch (error) {
-      // File doesn't exist, create it
-      await this.github.createFile(this.owner, this.repo, path, content, message)
-      this.fileCache.set(path, {
-        content: content,
-        lastModified: new Date().toISOString(),
-      })
-      this.saveCacheToStorage()
-    }
-  }
-
-  async refreshCache(): Promise<void> {
-    try {
-      const files = await this.github.listFiles(this.owner, this.repo)
-      this.fileCache.clear()
-
-      for (const file of files) {
-        if (file.type === "file") {
-          try {
-            const content = await this.github.getFileContent(this.owner, this.repo, file.path)
-            this.fileCache.set(file.path, {
-              content: content.content,
-              lastModified: new Date().toISOString(),
-            })
-          } catch (error) {
-            console.error(`Error caching file ${file.path}:`, error)
-          }
-        }
-      }
-
-      this.saveCacheToStorage()
-    } catch (error) {
-      console.error("Error refreshing cache:", error)
-    }
-  }
-
-  // Task Management in GitHub
-  async getTasks(): Promise<any[]> {
-    try {
-      const content = await this.getFileContent(".prodev/tasks.json")
-      return JSON.parse(content)
-    } catch (error) {
+      console.log("No tasks file found, returning empty array")
       return []
     }
   }
 
-  async saveTasks(tasks: any[]): Promise<void> {
-    const content = JSON.stringify(tasks, null, 2)
-    await this.updateFileContent(".prodev/tasks.json", content, "📋 Update tasks")
+  async saveTasks(tasks: Task[]): Promise<void> {
+    try {
+      await this.ensureRepository()
+      const content = JSON.stringify(tasks, null, 2)
+
+      try {
+        // Try to update existing file
+        const existingFile = await this.github.getFileContent(this.owner, this.repo, ".prodev/tasks.json")
+        await this.github.updateFile(
+          this.owner,
+          this.repo,
+          ".prodev/tasks.json",
+          content,
+          "Update tasks",
+          existingFile.sha,
+        )
+      } catch (error) {
+        // File doesn't exist, create it
+        await this.github.createFile(this.owner, this.repo, ".prodev/tasks.json", content, "Create tasks file")
+      }
+    } catch (error) {
+      console.error("Error saving tasks:", error)
+      throw error
+    }
   }
 
-  async createTask(task: any): Promise<void> {
+  async createTask(task: Task): Promise<void> {
     const tasks = await this.getTasks()
     tasks.push(task)
     await this.saveTasks(tasks)
   }
 
-  async updateTask(taskId: string, updates: any): Promise<void> {
+  async updateTask(taskId: string, updates: Partial<Task>): Promise<void> {
     const tasks = await this.getTasks()
     const taskIndex = tasks.findIndex((t) => t.id === taskId)
     if (taskIndex !== -1) {
-      tasks[taskIndex] = { ...tasks[taskIndex], ...updates, updatedAt: new Date().toISOString() }
+      tasks[taskIndex] = { ...tasks[taskIndex], ...updates }
       await this.saveTasks(tasks)
     }
   }
@@ -160,44 +139,115 @@ export class GitHubStorageService {
     await this.saveTasks(filteredTasks)
   }
 
-  // Agent Memory in GitHub with Cache
-  async getAgentMemory(): Promise<AgentMemory | null> {
-    try {
-      const content = await this.getFileContent(".prodev/agent-memory.json")
-      const memory = JSON.parse(content)
-      memory.fileCache = Object.fromEntries(this.fileCache)
-      return memory
-    } catch (error) {
-      return {
-        projectId: "",
-        conversationHistory: [],
-        taskHistory: [],
-        codeContext: [],
-        learnings: {},
-        currentFocus: "Development",
-        lastUpdate: new Date().toISOString(),
-        fileCache: Object.fromEntries(this.fileCache),
-      }
-    }
-  }
-
-  async saveAgentMemory(memory: AgentMemory): Promise<void> {
-    const content = JSON.stringify(memory, null, 2)
-    await this.updateFileContent(".prodev/agent-memory.json", content, "🧠 Update agent memory")
-  }
-
-  // Project Metadata
   async getProjectMetadata(): Promise<ProjectMetadata | null> {
     try {
-      const content = await this.getFileContent(".prodev/project.json")
-      return JSON.parse(content)
+      await this.ensureRepository()
+      const content = await this.github.getFileContent(this.owner, this.repo, ".prodev/metadata.json")
+      return JSON.parse(content.content)
     } catch (error) {
       return null
     }
   }
 
   async saveProjectMetadata(metadata: ProjectMetadata): Promise<void> {
-    const content = JSON.stringify(metadata, null, 2)
-    await this.updateFileContent(".prodev/project.json", content, "📊 Update project metadata")
+    try {
+      await this.ensureRepository()
+      const content = JSON.stringify(metadata, null, 2)
+
+      try {
+        const existingFile = await this.github.getFileContent(this.owner, this.repo, ".prodev/metadata.json")
+        await this.github.updateFile(
+          this.owner,
+          this.repo,
+          ".prodev/metadata.json",
+          content,
+          "Update project metadata",
+          existingFile.sha,
+        )
+      } catch (error) {
+        await this.github.createFile(this.owner, this.repo, ".prodev/metadata.json", content, "Create project metadata")
+      }
+    } catch (error) {
+      console.error("Error saving project metadata:", error)
+      throw error
+    }
+  }
+
+  async getAgentMemory(): Promise<AgentMemory | null> {
+    try {
+      await this.ensureRepository()
+      const content = await this.github.getFileContent(this.owner, this.repo, ".prodev/agent-memory.json")
+      return JSON.parse(content.content)
+    } catch (error) {
+      return null
+    }
+  }
+
+  async saveAgentMemory(memory: AgentMemory): Promise<void> {
+    try {
+      await this.ensureRepository()
+      const content = JSON.stringify(memory, null, 2)
+
+      try {
+        const existingFile = await this.github.getFileContent(this.owner, this.repo, ".prodev/agent-memory.json")
+        await this.github.updateFile(
+          this.owner,
+          this.repo,
+          ".prodev/agent-memory.json",
+          content,
+          "Update agent memory",
+          existingFile.sha,
+        )
+      } catch (error) {
+        await this.github.createFile(this.owner, this.repo, ".prodev/agent-memory.json", content, "Create agent memory")
+      }
+    } catch (error) {
+      console.error("Error saving agent memory:", error)
+      throw error
+    }
+  }
+
+  async getAllFiles(): Promise<any[]> {
+    try {
+      await this.ensureRepository()
+      return await this.github.getRepositoryContents(this.owner, this.repo, "", true) // recursive = true
+    } catch (error) {
+      console.error("Error getting all files:", error)
+      return []
+    }
+  }
+
+  async getFileContent(filePath: string): Promise<string> {
+    try {
+      await this.ensureRepository()
+      const content = await this.github.getFileContent(this.owner, this.repo, filePath)
+      return content.content
+    } catch (error) {
+      console.error(`Error getting file content for ${filePath}:`, error)
+      return ""
+    }
+  }
+
+  async saveFileContent(filePath: string, content: string, message?: string): Promise<void> {
+    try {
+      await this.ensureRepository()
+
+      try {
+        const existingFile = await this.github.getFileContent(this.owner, this.repo, filePath)
+        await this.github.updateFile(
+          this.owner,
+          this.repo,
+          filePath,
+          content,
+          message || `Update ${filePath}`,
+          existingFile.sha,
+        )
+      } catch (error) {
+        await this.github.createFile(this.owner, this.repo, filePath, content, message || `Create ${filePath}`)
+      }
+    } catch (error) {
+      console.error(`Error saving file ${filePath}:`, error)
+      throw error
+    }
   }
 }
