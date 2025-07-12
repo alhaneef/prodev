@@ -251,4 +251,34 @@ export class GitHubStorageService {
     const content = JSON.stringify(memory, null, 2)
     await this.saveFileContent(".prodev/agent-memory.json", content, "Update agent memory")
   }
+
+  async saveDeploymentLog(log: any): Promise<void> {
+    try {
+      const existingLogs = await this.getFileContent(".prodev/deployment-logs.json")
+      let logs = []
+
+      if (existingLogs) {
+        logs = JSON.parse(existingLogs)
+      }
+
+      logs.push(log)
+
+      // Keep only last 100 logs
+      if (logs.length > 100) {
+        logs = logs.slice(-100)
+      }
+
+      await this.saveFileContent(
+        ".prodev/deployment-logs.json",
+        JSON.stringify(logs, null, 2),
+        "Update deployment logs",
+      )
+    } catch (error) {
+      console.error("Error saving deployment log:", error)
+    }
+  }
+
+  async updateFileContent(filePath: string, content: string, message: string): Promise<void> {
+    await this.saveFileContent(filePath, content, message)
+  }
 }

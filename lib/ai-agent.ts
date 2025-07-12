@@ -2,6 +2,13 @@ import { GoogleGenerativeAI } from "@google/generative-ai"
 import type { GitHubStorageService } from "./github-storage"
 import type { GitHubService } from "./github-service"
 
+// Load Puter.js dynamically
+declare global {
+  interface Window {
+    puter: any
+  }
+}
+
 export interface Task {
   id: string
   title: string
@@ -36,12 +43,131 @@ export class AIAgent {
   private model: any
   private githubStorage?: GitHubStorageService
   private github?: GitHubService
+  private puterLoaded = false
 
   constructor(apiKey: string, githubStorage?: GitHubStorageService, github?: GitHubService) {
     this.genAI = new GoogleGenerativeAI(apiKey)
     this.model = this.genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" })
     this.githubStorage = githubStorage
     this.github = github
+    this.initializePuter()
+  }
+
+  private async initializePuter(): Promise<void> {
+    try {
+      // Load Puter.js if not already loaded
+      if (typeof window !== "undefined" && !window.puter) {
+        const script = document.createElement("script")
+        script.src = "https://js.puter.com/v2/"
+        script.async = true
+
+        await new Promise((resolve, reject) => {
+          script.onload = resolve
+          script.onerror = reject
+          document.head.appendChild(script)
+        })
+
+        // Wait for puter to be available
+        let attempts = 0
+        while (!window.puter && attempts < 50) {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          attempts++
+        }
+      }
+
+      this.puterLoaded = !!window.puter
+      console.log("Puter.js loaded:", this.puterLoaded)
+    } catch (error) {
+      console.warn("Failed to load Puter.js, falling back to existing providers:", error)
+      this.puterLoaded = false
+    }
+  }
+
+  private async chatWithPuter(prompt: string, options: any = {}): Promise<string> {
+    try {
+      if (!this.puterLoaded || !window.puter) {
+        throw new Error("Puter not available")
+      }
+
+      const response = await window.puter.ai.chat(prompt, {
+        model: options.model || "claude-sonnet-4",
+        max_tokens: options.max_tokens || 4000,
+        temperature: options.temperature || 0.7,
+        ...options,
+      })
+
+      return typeof response === "string" ? response : response.message || response.text || String(response)
+    } catch (error) {
+      console.warn("Puter AI request failed:", error)
+      throw error
+    }
+  }
+
+  private async chatWithGPT4(prompt: string, options: any = {}): Promise<string> {
+    try {
+      if (!this.puterLoaded || !window.puter) {
+        throw new Error("Puter not available")
+      }
+
+      const response = await window.puter.ai.chat(prompt, {
+        model: "gpt-4.1",
+        max_tokens: options.max_tokens || 4000,
+        temperature: options.temperature || 0.7,
+        ...options,
+      })
+
+      return typeof response === "string" ? response : response.message || response.text || String(response)
+    } catch (error) {
+      console.warn("Puter GPT-4.1 request failed:", error)
+      throw error
+    }
+  }
+
+  private async chatWithGemini(prompt: string, options: any = {}): Promise<string> {
+    try {
+      const result = await this.model.generateContent(prompt)
+      const response = await result.response
+      return response.text()
+    } catch (error) {
+      console.warn("Gemini request failed:", error)
+      throw error
+    }
+  }
+
+  private async performAIRequest(prompt: string, options: any = {}): Promise<string> {
+    const errors: string[] = []
+
+    // Try Puter Claude Sonnet 4 first
+    try {
+      console.log("🤖 Trying Puter Claude Sonnet 4...")
+      return await this.chatWithPuter(prompt, { model: "claude-sonnet-4", ...options })
+    } catch (error) {
+      const errorMsg = `Puter Claude failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      console.warn(errorMsg)
+      errors.push(errorMsg)
+    }
+
+    // Try Puter GPT-4.1 as fallback
+    try {
+      console.log("🤖 Trying Puter GPT-4.1...")
+      return await this.chatWithGPT4(prompt, options)
+    } catch (error) {
+      const errorMsg = `Puter GPT-4.1 failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      console.warn(errorMsg)
+      errors.push(errorMsg)
+    }
+
+    // Try Gemini as final fallback
+    try {
+      console.log("🤖 Trying Gemini fallback...")
+      return await this.chatWithGemini(prompt, options)
+    } catch (error) {
+      const errorMsg = `Gemini failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      console.warn(errorMsg)
+      errors.push(errorMsg)
+    }
+
+    throw new Error(`All AI providers failed: ${errors.join("; ")}`)
   }
 
   async generateTasks(projectDescription: string, framework: string, userContext?: string): Promise<Task[]> {
@@ -73,9 +199,8 @@ export class AIAgent {
     `
 
     try {
-      const result = await this.model.generateContent(prompt)
-      const response = await result.response
-      let text = response.text().trim()
+      const response = await this.performAIRequest(prompt)
+      let text = response.trim()
 
       if (text.startsWith("```json")) {
         text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
@@ -149,9 +274,8 @@ export class AIAgent {
 
     try {
       console.log("AIAgent - Generating implementation with AI")
-      const result = await this.model.generateContent(prompt)
-      const response = await result.response
-      let text = response.text().trim()
+      const response = await this.performAIRequest(prompt)
+      let text = response.trim()
 
       if (text.startsWith("```json")) {
         text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
@@ -172,7 +296,6 @@ export class AIAgent {
           if (file.operation === "create" || file.operation === "update") {
             await this.githubStorage.saveFileContent(file.path, file.content, implementation.commitMessage)
           } else if (file.operation === "delete") {
-            // Handle file deletion if needed
             console.log("AIAgent - File deletion not implemented yet:", file.path)
           }
         }
@@ -211,9 +334,7 @@ export class AIAgent {
     `
 
     try {
-      const result = await this.model.generateContent(prompt)
-      const response = await result.response
-      return response.text()
+      return await this.performAIRequest(prompt)
     } catch (error) {
       console.error("Error generating chat response:", error)
       throw error
@@ -267,6 +388,71 @@ export class AIAgent {
       return `Executing: ${command}\n✅ Command completed successfully`
     } catch (error) {
       return `Error executing command: ${error instanceof Error ? error.message : "Unknown error"}`
+    }
+  }
+
+  async fixDeploymentError(
+    error: string,
+    project: any,
+  ): Promise<{
+    solution: string
+    files: Array<{ path: string; content: string; operation: "create" | "update" | "delete" }>
+  }> {
+    const prompt = `
+    You are an expert deployment engineer. Analyze this deployment error and provide a fix.
+    
+    Project: ${project.name}
+    Framework: ${project.framework}
+    Platform: ${project.deploymentPlatform || "Vercel"}
+    
+    Deployment Error:
+    ${error}
+    
+    CRITICAL INSTRUCTIONS:
+    1. Analyze the deployment error to identify the root cause
+    2. Provide specific file fixes based on the actual error
+    3. Return ONLY valid JSON in this exact format
+    4. Do NOT include markdown or explanations
+    
+    Common deployment issues and fixes:
+    - JSON parsing errors: Fix malformed JSON files
+    - Missing dependencies: Add to package.json
+    - Build script errors: Fix build commands
+    - Environment variable issues: Add default values
+    - File path errors: Correct import paths
+    - TypeScript errors: Fix type issues
+    - Missing files: Create required files
+    
+    Return this exact JSON structure:
+    {
+      "solution": "Brief description of the fix",
+      "files": [
+        {
+          "path": "relative/path/to/file.ext",
+          "content": "complete fixed file content",
+          "operation": "create|update"
+        }
+      ]
+    }
+    `
+
+    try {
+      const response = await this.performAIRequest(prompt)
+      let text = response.trim()
+
+      if (text.startsWith("```json")) {
+        text = text.replace(/```json\n?/, "").replace(/\n?```$/, "")
+      }
+
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) {
+        throw new Error("No valid JSON found in AI response")
+      }
+
+      return JSON.parse(jsonMatch[0])
+    } catch (error) {
+      console.error("Error fixing deployment error:", error)
+      throw error
     }
   }
 }
